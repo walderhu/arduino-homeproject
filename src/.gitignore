@@ -2,3 +2,6 @@
 config.h
 
 examples
+.venv
+env
+.vscode
