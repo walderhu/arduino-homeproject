@@ -1,8 +1,8 @@
 #include "../config.h"
 #include "esp_camera.h"
 #include <Arduino.h>
-#include <WebServer.h>
 #include <WiFi.h>
+#include <esp_http_server.h>
 
 // ── Camera pins ───────────────────────────────────────────────────────────────
 #if defined(CAMERA_MODEL_FREENOVE_S3) || defined(CAMERA_MODEL_ESP32S3_EYE)
@@ -47,7 +47,16 @@
 #endif
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-static const char BOUNDARY[] = "framebound";
+#define PART_BOUNDARY "framebound"
+static const char BOUNDARY[] = PART_BOUNDARY;
+
+#ifndef STREAM_TARGET_FPS
+#define STREAM_TARGET_FPS 0
+#endif
+
+#ifndef STREAM_CLOSE_AFTER_MS
+#define STREAM_CLOSE_AFTER_MS 500
+#endif
 
 static const char INDEX_HTML[] PROGMEM = R"html(
 <!DOCTYPE html>
@@ -93,26 +102,26 @@ static const char INDEX_HTML[] PROGMEM = R"html(
     <a id="link" href="#">loading...</a>
   </div>
   <script>
-    const ip   = window.location.hostname;
-    const url  = 'http://' + ip + ':81/stream';
-    document.getElementById('stream').src = url;
+    const streamUrl = 'http://' + window.location.hostname + ':81/stream';
+    const img = document.getElementById('stream');
+    function connectStream() { img.src = streamUrl + '?t=' + Date.now(); }
+    img.onerror = () => setTimeout(connectStream, 250);
+    connectStream();
     const link = document.getElementById('link');
-    link.href  = url;
-    link.textContent = url;
+    link.href  = streamUrl;
+    link.textContent = streamUrl;
   </script>
 </body>
 </html>
 )html";
 
 // ── Globals ───────────────────────────────────────────────────────────────────
-WebServer server(80);
-WiFiServer streamServer(81);
+static httpd_handle_t cameraHttpd = NULL;
+static httpd_handle_t streamHttpd = NULL;
 
 static void logLine(const char *line) {
     Serial.println(line);
     Serial0.println(line);
-    Serial.flush();
-    Serial0.flush();
 }
 
 static void logPrintf(const char *format, ...) {
@@ -156,44 +165,140 @@ static bool initCamera() {
     return esp_camera_init(&cfg) == ESP_OK;
 }
 
-// ── MJPEG stream ──────────────────────────────────────────────────────────────
-static void handleStream(void *arg) {
-    WiFiClient client = *reinterpret_cast<WiFiClient *>(arg);
-    delete reinterpret_cast<WiFiClient *>(arg);
+// ── HTTP camera server ────────────────────────────────────────────────────────
+static esp_err_t indexHandler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
+}
 
-    // Consume HTTP request headers
-    while (client.connected() && client.available()) {
-        String line = client.readStringUntil('\n');
-        if (line == "\r")
-            break;
+static esp_err_t jpgHandler(httpd_req_t *req) {
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
     }
 
-    client.printf("HTTP/1.1 200 OK\r\n"
-                  "Content-Type: multipart/x-mixed-replace;boundary=%s\r\n"
-                  "Access-Control-Allow-Origin: *\r\n"
-                  "Cache-Control: no-store\r\n"
-                  "Connection: close\r\n\r\n",
-                  BOUNDARY);
+    char len[16];
+    snprintf(len, sizeof(len), "%u", static_cast<unsigned int>(fb->len));
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_set_hdr(req, "Content-Length", len);
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    esp_err_t res = httpd_resp_send(req, reinterpret_cast<const char *>(fb->buf), fb->len);
+    esp_camera_fb_return(fb);
+    return res;
+}
 
-    while (client.connected()) {
+static esp_err_t streamHandler(httpd_req_t *req) {
+    static const char *streamType = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
+    static const char *streamBoundary = "\r\n--" PART_BOUNDARY "\r\n";
+    static const char *streamPart = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+
+    esp_err_t res = httpd_resp_set_type(req, streamType);
+    if (res != ESP_OK)
+        return res;
+
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    httpd_resp_set_hdr(req, "Pragma", "no-cache");
+    httpd_resp_set_hdr(req, "X-Framerate", "60");
+
+    char partBuf[64];
+    uint32_t statsStartMs = millis();
+    uint32_t statsFrames = 0;
+    uint32_t statsBytes = 0;
+    uint32_t maxCaptureMs = 0;
+    uint32_t maxSendMs = 0;
+
+    while (true) {
+        uint32_t captureStartMs = millis();
         camera_fb_t *fb = esp_camera_fb_get();
+        uint32_t captureMs = millis() - captureStartMs;
         if (!fb) {
-            delay(10);
-            continue;
+            logLine("[Stream] Camera capture failed");
+            return ESP_FAIL;
         }
+        if (captureMs > maxCaptureMs)
+            maxCaptureMs = captureMs;
 
-        client.printf("--%s\r\n"
-                      "Content-Type: image/jpeg\r\n"
-                      "Content-Length: %u\r\n\r\n",
-                      BOUNDARY, fb->len);
-        client.write(fb->buf, fb->len);
-        client.print("\r\n");
+        size_t partLen =
+            snprintf(partBuf, sizeof(partBuf), streamPart, static_cast<unsigned int>(fb->len));
+        uint32_t sendStartMs = millis();
+        res = httpd_resp_send_chunk(req, streamBoundary, strlen(streamBoundary));
+        if (res == ESP_OK)
+            res = httpd_resp_send_chunk(req, partBuf, partLen);
+        if (res == ESP_OK)
+            res = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(fb->buf), fb->len);
+        uint32_t sendMs = millis() - sendStartMs;
+        if (sendMs > maxSendMs)
+            maxSendMs = sendMs;
 
+        size_t frameLen = fb->len;
         esp_camera_fb_return(fb);
+
+        if (res != ESP_OK)
+            break;
+
+        statsFrames++;
+        statsBytes += frameLen;
+
+        uint32_t statsElapsedMs = millis() - statsStartMs;
+        if (statsElapsedMs >= 5000) {
+            float fps = statsFrames * 1000.0f / statsElapsedMs;
+            uint32_t avgKb = statsFrames > 0 ? (statsBytes / statsFrames) / 1024 : 0;
+            logPrintf("[Stream] fps=%.1f avg=%luKB maxCapture=%lums maxSend=%lums", fps,
+                      static_cast<unsigned long>(avgKb),
+                      static_cast<unsigned long>(maxCaptureMs),
+                      static_cast<unsigned long>(maxSendMs));
+            statsStartMs = millis();
+            statsFrames = 0;
+            statsBytes = 0;
+            maxCaptureMs = 0;
+            maxSendMs = 0;
+        }
     }
 
-    client.stop();
-    vTaskDelete(NULL);
+    return res;
+}
+
+static void startCameraServer() {
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.max_uri_handlers = 4;
+    config.stack_size = 8192;
+    config.lru_purge_enable = true;
+    config.recv_wait_timeout = 1;
+    config.send_wait_timeout = 1;
+
+    httpd_uri_t indexUri = {
+        .uri = "/",
+        .method = HTTP_GET,
+        .handler = indexHandler,
+        .user_ctx = NULL,
+    };
+    httpd_uri_t jpgUri = {
+        .uri = "/jpg",
+        .method = HTTP_GET,
+        .handler = jpgHandler,
+        .user_ctx = NULL,
+    };
+    httpd_uri_t streamUri = {
+        .uri = "/stream",
+        .method = HTTP_GET,
+        .handler = streamHandler,
+        .user_ctx = NULL,
+    };
+
+    if (httpd_start(&cameraHttpd, &config) == ESP_OK) {
+        httpd_register_uri_handler(cameraHttpd, &indexUri);
+        httpd_register_uri_handler(cameraHttpd, &jpgUri);
+    }
+
+    config.server_port += 1;
+    config.ctrl_port += 1;
+    if (httpd_start(&streamHttpd, &config) == ESP_OK) {
+        httpd_register_uri_handler(streamHttpd, &streamUri);
+    }
 }
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
@@ -224,6 +329,26 @@ void setup() {
     else
         logLine("[WARN] No PSRAM — quality/fps limited");
 
+    WiFi.mode(WIFI_OFF);
+    delay(100);
+#if WIFI_AP_MODE
+    WiFi.mode(WIFI_AP);
+    WiFi.setSleep(false);
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
+    WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
+                      IPAddress(255, 255, 255, 0));
+    bool apOk = WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS, WIFI_AP_CHANNEL, 0, 1);
+    if (!apOk) {
+        logLine("[ERROR] WiFi AP start failed");
+        while (true)
+            delay(1000);
+    }
+    logPrintf("[WiFi] AP: %s pass=%s", WIFI_AP_SSID, WIFI_AP_PASS);
+    logPrintf("[WiFi] AP IP: %s", WiFi.softAPIP().toString().c_str());
+#else
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     logLine("[WiFi] Connecting");
     while (WiFi.status() != WL_CONNECTED) {
@@ -232,34 +357,37 @@ void setup() {
         Serial0.print(".");
     }
     logPrintf("[WiFi] Connected: %s", WiFi.localIP().toString().c_str());
+#endif
 
-    server.on("/", []() { server.send_P(200, "text/html", INDEX_HTML); });
-    server.begin();
-    streamServer.begin();
+    startCameraServer();
 
+#if WIFI_AP_MODE
+    logPrintf("[HTTP]  http://%s", WiFi.softAPIP().toString().c_str());
+    logPrintf("[Stream] http://%s:81/stream", WiFi.softAPIP().toString().c_str());
+#else
     logPrintf("[HTTP]  http://%s", WiFi.localIP().toString().c_str());
     logPrintf("[Stream] http://%s:81/stream", WiFi.localIP().toString().c_str());
+#endif
 }
 
 // ── Loop ──────────────────────────────────────────────────────────────────────
 void loop() {
-    server.handleClient();
-
     static uint32_t lastStatusMs = 0;
-    if (millis() - lastStatusMs > 5000) {
+    if (millis() - lastStatusMs > 30000) {
         lastStatusMs = millis();
+#if WIFI_AP_MODE
+        logPrintf("[HTTP]  http://%s", WiFi.softAPIP().toString().c_str());
+        logPrintf("[Stream] http://%s:81/stream stations=%d", WiFi.softAPIP().toString().c_str(),
+                  WiFi.softAPgetStationNum());
+#else
         if (WiFi.status() == WL_CONNECTED) {
             logPrintf("[HTTP]  http://%s", WiFi.localIP().toString().c_str());
             logPrintf("[Stream] http://%s:81/stream", WiFi.localIP().toString().c_str());
         } else {
             logPrintf("[WiFi] Disconnected, status=%d", WiFi.status());
         }
+#endif
     }
 
-    WiFiClient client = streamServer.accept();
-    if (client) {
-        // Each viewer gets own FreeRTOS task — non-blocking
-        WiFiClient *clientPtr = new WiFiClient(client);
-        xTaskCreate(handleStream, "stream", 8192, clientPtr, 1, NULL);
-    }
+    delay(10);
 }
