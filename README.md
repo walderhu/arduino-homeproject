@@ -1,57 +1,65 @@
-# arduino-homeproject
 
-Набор PlatformIO-проектов для ESP32 и общие материалы для схем/даташитов.
+# esp_level
+Набор PlatformIO-проектов для ESP32/ESP32-S3, общая прошивка через pip-окружение и локальные даташиты в папках проектов.
 
 ## Установка окружения
 
-В новом WSL/Linux окружении:
+Нужен Python 3.10.
 
 ```bash
-sudo apt update
-sudo apt install -y git python3 python3-venv python3-pip
+sudo apt install -y git python3.10 python3.10-venv
 ```
-
-Клонируйте репозиторий и создайте одно pip-окружение в корне:
 
 ```bash
-git clone git@github.com:walderhu/arduino-homeproject.git
-cd arduino-homeproject
-
-python3 -m venv .venv
-.venv/bin/python -m pip install -U pip setuptools wheel
-.venv/bin/python -m pip install -r requirements.txt
+cd path/to/arduino-homeproject
+python3.10 setup.py
 ```
+
+Скрипт создаёт `.venv`, ставит зависимости и предзагружает все espressif32-пакеты — чтобы первая прошивка не качала их на лету.
 
 Проверка:
 
 ```bash
-.venv/bin/platformio --version
-.venv/bin/pio --version
+which python # path/to/arduino-homeproject/.venv/bin/python
+python -m platformio --version
 ```
 
-`conda activate pio` и `source /home/tru60/biochemlab/biochemlab/bin/activate` больше не нужны. Общий скрипт прошивки использует `./.venv/bin/platformio` и `./.venv/bin/pio`.
-
-Если окружение лежит не в `.venv`, можно передать путь:
+Если окружение лежит не в `.venv`, задайте путь:
 
 ```bash
-export ARDUINO_HOMEPROJECT_VENV=/path/to/venv
+export ESP32_LEVEL_VENV=/path/to/venv
 ```
 
-## USB в WSL
+## Прошивка ESP
 
-Для прошивки из WSL нужен установленный Windows `usbipd-win`, чтобы из WSL была доступна команда:
+Общий скрипт лежит в корне:
+
+В `flash.sh` можно передать любой путь внутри PlatformIO-проекта:
+
+- директорию проекта;
+- файл `platformio.ini`;
+- файл `.ino` в `src/`;
+- старый путь к `.ino` в корне проекта, если файл уже переехал в `src/`.
 
 ```bash
-usbipd.exe --version
+./flash.sh src/esp_level/test/heater
+./flash.sh src/esp_level/test/heater/platformio.ini
+./flash.sh src/esp_level/test/heater/src/main.ino
 ```
 
-Скрипт ищет платы с USB-UART `CP210x` или `CH340` через `usbipd.exe list` и подключает их к WSL, если `/dev/ttyUSB*` еще нет.
+Скрипт сам поднимается вверх до ближайшего `platformio.ini`, запускает upload и затем serial monitor на `115200`.
 
-## Функция run
-
-Добавьте функцию в shell, например в `~/.bashrc`:
+То же самое можно вызывать через shell-функцию `run`, если она настроена в `.bashrc`:
 
 ```bash
+run src/esp_level/test/heater
+run src/esp_level/test/heater/platformio.ini
+run src/esp_level/test/heater/src/main.ino
+```
+
+Функция `run`:
+
+```
 find_up() {
     local start="$1"
     local name="$2"
@@ -74,61 +82,71 @@ find_up() {
     return 1
 }
 
-find_platformio_project() {
-    local start="$1"
-    local dir
-
-    if [ -f "$start" ]; then
-        dir="$(cd "$(dirname "$start")" && pwd)"
-    else
-        dir="$(cd "$start" && pwd)"
-    fi
-
-    while [ "$dir" != "/" ]; do
-        if [ -f "$dir/platformio.ini" ]; then
-            printf '%s\n' "$dir"
-            return 0
-        fi
-        dir="$(dirname "$dir")"
-    done
-
-    return 1
-}
-
 run() {
     local file="$1"
     local ext="${file##*.}"
-    local flash
-    local project_dir
-
+    local dir="$(dirname "$file")"
+    local base="$(basename "$file")"
     case "$ext" in
         ino)
-            project_dir="$(find_platformio_project "$file")" || {
-                echo "Не найден platformio.ini для $file" >&2
+            flash="$(find_up "$file" flash.sh)" || {
+                echo "Не найден flash.sh выше $file" >&2
                 return 1
             }
-
-            flash="$(find_up "$project_dir" flash.sh)" || {
-                echo "Не найден flash.sh выше $project_dir" >&2
-                return 1
-            }
-
-            "$flash" "$project_dir"
+            "$flash" "$file"
             ;;
-        *) echo "Нет обработчика для .$ext" ;;
+        ini)
+            if [ "$base" != "platformio.ini" ]; then
+                echo "нет обработчика для .$ext: $file" >&2
+                return 1
+            fi
+            flash="$(find_up "$file" flash.sh)" || {
+                echo "Не найден flash.sh выше $file" >&2
+                return 1
+            }
+            "$flash" "$file"
+            ;;
+        *)           echo "нет обработчика для .$ext" ;;
     esac
 }
 ```
 
-После этого можно перейти в папку проекта и прошить:
+## USB в WSL
+
+Для автоматического подключения USB-UART из WSL нужен `usbipd-win` на Windows, чтобы в WSL была доступна команда:
 
 ```bash
-cd src/radio/NRF24L01/src
-run main.ino
+usbipd.exe --version
 ```
 
-Или вызвать с абсолютным путем:
+Скрипт ищет устройства `CP210x` или `CH340`. Если автоматическое подключение не сработало, подключите плату вручную через `usbipd.exe`, затем повторите `./flash.sh <project>`.
+
+## Даташиты
+
+В каждой PlatformIO-папке есть `datasheet/` с материалами по плате и основным модулям проекта:
+
+- `head/datasheet`
+- `heat/datasheet`
+- `led_strip/datasheet`
+- `peristalsis/datasheet`
+- `pnevma_i2c/datasheet`
+- `robohand/datasheet`
+- `vortex/datasheet`
+- `position_system_i2c/firmware/datasheet`
+
+Тесты отдельных компонентов лежат в `test/`:
+
+- `test/ESP_UNO`
+- `test/button`
+- `test/pwm`
+- `test/relay`
+
+Для них тоже работает `flash.sh` и `run`:
 
 ```bash
-run /home/tru60/arduino-homeproject/src/radio/NRF24L01/src/main.ino
+./flash.sh test/button
+./flash.sh test/pwm/platformio.ini
+run src/esp_level/test/relay
 ```
+
+Общая подборка лежит в `datasheets/common`; повторяющиеся изображения там оформлены как симлинки на файлы из проектных `datasheet/`.
