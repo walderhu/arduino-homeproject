@@ -58,23 +58,39 @@ static const char INDEX_HTML[] PROGMEM = R"html(
   <title>ESP32-S3 Camera</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
     body {
       background: #111; color: #eee;
       font-family: system-ui, sans-serif;
-      display: flex; flex-direction: column;
-      align-items: center; padding: 20px; gap: 12px;
     }
-    h1 { font-size: 1.3rem; }
-    img { max-width: 100%; border: 2px solid #444; border-radius: 6px; }
-    .info { font-size: 0.78rem; color: #777; }
+    img {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      object-fit: contain;
+      background: #000;
+    }
+    .info {
+      position: fixed;
+      left: 10px;
+      bottom: 10px;
+      padding: 6px 8px;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.55);
+      font-size: 0.78rem;
+      color: #bbb;
+    }
     a { color: #9fe870; }
   </style>
 </head>
 <body>
-  <h1>ESP32-S3 Live Stream</h1>
   <img id="stream" alt="loading...">
   <div class="info">
-    Direct stream URL: <a id="link" href="#">loading...</a>
+    <a id="link" href="#">loading...</a>
   </div>
   <script>
     const ip   = window.location.hostname;
@@ -197,6 +213,12 @@ void setup() {
             delay(1000);
     }
     logLine("[OK] Camera initialized");
+    sensor_t *sensor = esp_camera_sensor_get();
+    if (sensor) {
+        sensor->set_vflip(sensor, 1);
+        sensor->set_hmirror(sensor, 1);
+        logLine("[OK] Camera image rotated 180 degrees");
+    }
     if (psramFound())
         logLine("[OK] PSRAM found");
     else
