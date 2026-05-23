@@ -91,7 +91,7 @@ if grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null; then
     fi
 
     if ! UPLOAD_PORT="$(find_serial_device)"; then
-        PORT="$("$USBIPD" list 2>/dev/null | tr -d '\r' | awk '/CP210x|CH340|Espressif|ESP32|USB JTAG|USB Serial/ && $1 ~ /^[0-9]+-[0-9]+$/ { print $1; exit }' || true)"
+        PORT="$("$USBIPD" list 2>/dev/null | tr -d '\r' | awk '/CP210x|CH340|CH343|Espressif|ESP32|USB JTAG|USB Serial/ && $1 ~ /^[0-9]+-[0-9]+$/ { print $1; exit }' || true)"
 
         if [ -z "$PORT" ]; then
             echo "Ошибка: ESP32 не подключена или не проброшена в WSL." >&2

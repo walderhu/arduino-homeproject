@@ -92,6 +92,22 @@ static const char INDEX_HTML[] PROGMEM = R"html(
 WebServer server(80);
 WiFiServer streamServer(81);
 
+static void logLine(const char *line) {
+    Serial.println(line);
+    Serial0.println(line);
+    Serial.flush();
+    Serial0.flush();
+}
+
+static void logPrintf(const char *format, ...) {
+    char buffer[160];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    logLine(buffer);
+}
+
 // ── Camera init ───────────────────────────────────────────────────────────────
 static bool initCamera() {
     camera_config_t cfg = {};
@@ -167,40 +183,56 @@ static void handleStream(void *arg) {
 // ── Setup ─────────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-    delay(500);
+    Serial0.begin(115200);
+    Serial.setDebugOutput(true);
+    delay(1500);
 
-    Serial.println("\n=== ESP32-S3 Camera Stream ===");
+    logLine("\n=== ESP32-S3 Camera Stream ===");
+    logLine("[BOOT] App started");
+    logPrintf("[BOOT] millis=%lu", static_cast<unsigned long>(millis()));
 
     if (!initCamera()) {
-        Serial.println("[ERROR] Camera init failed — check model/pins in config.h");
+        logLine("[ERROR] Camera init failed — check model/pins in config.h");
         while (true)
             delay(1000);
     }
-    Serial.println("[OK] Camera initialized");
+    logLine("[OK] Camera initialized");
     if (psramFound())
-        Serial.println("[OK] PSRAM found");
+        logLine("[OK] PSRAM found");
     else
-        Serial.println("[WARN] No PSRAM — quality/fps limited");
+        logLine("[WARN] No PSRAM — quality/fps limited");
 
     WiFi.begin(WIFI_SSID, WIFI_PASS);
-    Serial.print("[WiFi] Connecting");
+    logLine("[WiFi] Connecting");
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
         Serial.print(".");
+        Serial0.print(".");
     }
-    Serial.printf("\n[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
+    logPrintf("[WiFi] Connected: %s", WiFi.localIP().toString().c_str());
 
     server.on("/", []() { server.send_P(200, "text/html", INDEX_HTML); });
     server.begin();
     streamServer.begin();
 
-    Serial.printf("[HTTP]  http://%s\n", WiFi.localIP().toString().c_str());
-    Serial.printf("[Stream] http://%s:81/stream\n", WiFi.localIP().toString().c_str());
+    logPrintf("[HTTP]  http://%s", WiFi.localIP().toString().c_str());
+    logPrintf("[Stream] http://%s:81/stream", WiFi.localIP().toString().c_str());
 }
 
 // ── Loop ──────────────────────────────────────────────────────────────────────
 void loop() {
     server.handleClient();
+
+    static uint32_t lastStatusMs = 0;
+    if (millis() - lastStatusMs > 5000) {
+        lastStatusMs = millis();
+        if (WiFi.status() == WL_CONNECTED) {
+            logPrintf("[HTTP]  http://%s", WiFi.localIP().toString().c_str());
+            logPrintf("[Stream] http://%s:81/stream", WiFi.localIP().toString().c_str());
+        } else {
+            logPrintf("[WiFi] Disconnected, status=%d", WiFi.status());
+        }
+    }
 
     WiFiClient client = streamServer.accept();
     if (client) {
