@@ -25,12 +25,25 @@ find_project_dir() {
     return 1
 }
 
-wait_for_ttyusb() {
+find_serial_device() {
+    local device
+
+    for device in /dev/ttyACM* /dev/ttyUSB*; do
+        if [ -e "$device" ]; then
+            printf '%s\n' "$device"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+wait_for_serial_device() {
     local timeout_sec="${1:-10}"
     local elapsed=0
 
     while [ "$elapsed" -lt "$timeout_sec" ]; do
-        if ls /dev/ttyUSB* >/dev/null 2>&1; then
+        if find_serial_device >/dev/null; then
             return 0
         fi
 
@@ -42,7 +55,7 @@ wait_for_ttyusb() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_DIR="$(find_project_dir "${1:-.}")"
 
 if [ -z "$PROJECT_DIR" ]; then
@@ -52,6 +65,7 @@ fi
 
 VENV_DIR="${ESP32_LEVEL_VENV:-$REPO_ROOT/.venv}"
 PYTHON="$VENV_DIR/bin/python"
+UPLOAD_PORT="${UPLOAD_PORT:-}"
 
 if [ ! -x "$PYTHON" ]; then
     echo "Не найден PlatformIO в $VENV_DIR" >&2
@@ -76,24 +90,29 @@ if grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null; then
         exit 1
     fi
 
-    if ! ls /dev/ttyUSB* >/dev/null 2>&1; then
-        PORT="$("$USBIPD" list 2>/dev/null | tr -d '\r' | awk '/CP210x|CH340/ && $1 ~ /^[0-9]+-[0-9]+$/ { print $1; exit }')"
+    if ! UPLOAD_PORT="$(find_serial_device)"; then
+        PORT="$("$USBIPD" list 2>/dev/null | tr -d '\r' | awk '/CP210x|CH340|Espressif|ESP32|USB JTAG|USB Serial/ && $1 ~ /^[0-9]+-[0-9]+$/ { print $1; exit }' || true)"
 
         if [ -z "$PORT" ]; then
-            echo "Ошибка: ESP32 не подключена (CP210x/CH340 не найден)." >&2
+            echo "Ошибка: ESP32 не подключена или не проброшена в WSL." >&2
+            echo "Проверьте в Windows PowerShell: usbipd list" >&2
             exit 1
         fi
 
         "$USBIPD" bind --busid "$PORT" || true
         "$USBIPD" attach --wsl --busid "$PORT" || true
 
-        if ! wait_for_ttyusb 10; then
-            echo "Ошибка: устройство не появилось в /dev/ttyUSB* после attach." >&2
+        if ! wait_for_serial_device 10; then
+            echo "Ошибка: устройство не появилось в /dev/ttyACM* или /dev/ttyUSB* после attach." >&2
             exit 1
         fi
     fi
 fi
 
+if [ -z "$UPLOAD_PORT" ]; then
+    UPLOAD_PORT="$(find_serial_device || true)"
+fi
+
 cd "$PROJECT_DIR"
-"$PYTHON" -m platformio run --target upload
-"$PYTHON" -m platformio device monitor --baud 115200
+"$PYTHON" -m platformio run --target upload ${UPLOAD_PORT:+--upload-port "$UPLOAD_PORT"}
+"$PYTHON" -m platformio device monitor --baud 115200 ${UPLOAD_PORT:+--port "$UPLOAD_PORT"}
