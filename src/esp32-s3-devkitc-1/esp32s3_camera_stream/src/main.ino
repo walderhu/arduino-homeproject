@@ -248,8 +248,7 @@ static esp_err_t streamHandler(httpd_req_t *req) {
             float fps = statsFrames * 1000.0f / statsElapsedMs;
             uint32_t avgKb = statsFrames > 0 ? (statsBytes / statsFrames) / 1024 : 0;
             logPrintf("[Stream] fps=%.1f avg=%luKB maxCapture=%lums maxSend=%lums", fps,
-                      static_cast<unsigned long>(avgKb),
-                      static_cast<unsigned long>(maxCaptureMs),
+                      static_cast<unsigned long>(avgKb), static_cast<unsigned long>(maxCaptureMs),
                       static_cast<unsigned long>(maxSendMs));
             statsStartMs = millis();
             statsFrames = 0;

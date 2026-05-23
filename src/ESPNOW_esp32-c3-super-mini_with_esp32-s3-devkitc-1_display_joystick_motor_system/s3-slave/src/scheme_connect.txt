@@ -1,0 +1,18 @@
+
+
+
+
+
+ESP32 	|| DRIVER
+VIN 5V 	-> 	VM
+VIN 5V 	-> 	VCC
+GND 	->	GND
+GND 	->	GND
+GPIO13 	-> PWMA D6
+3.3V	-> AIN1 D8
+3.3V	-> STBY D12
+
+
+DRIVER 	|| MOTOR
+A01 	-> +
+A02 	-> -
