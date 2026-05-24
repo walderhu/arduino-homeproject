@@ -163,6 +163,46 @@ normalize_usbipd_busid() {
     printf '%s\n' "$busid"
 }
 
+warmup_serial_devices() {
+    local device
+    local warmed=0
+
+    for device in /dev/ttyACM* /dev/ttyUSB*; do
+        if [ -e "$device" ]; then
+            echo "Прогрев serial-порта: $device"
+            stty -F "$device" 115200 2>/dev/null || true
+            warmed=1
+        fi
+    done
+
+    if [ "$warmed" -eq 1 ]; then
+        sleep 2
+    fi
+}
+
+flash_with_retry() {
+    local port="${1:-}"
+
+    echo "--- Прошивка: ${port:-platformio default} ---"
+    if [ -n "$port" ]; then
+        if "$PYTHON" -m platformio run --target upload --upload-port "$port"; then
+            return 0
+        fi
+    else
+        if "$PYTHON" -m platformio run --target upload; then
+            return 0
+        fi
+    fi
+
+    echo "--- Повтор через 3s: ${port:-platformio default} ---" >&2
+    sleep 3
+    if [ -n "$port" ]; then
+        "$PYTHON" -m platformio run --target upload --upload-port "$port"
+    else
+        "$PYTHON" -m platformio run --target upload
+    fi
+}
+
 attach_usbipd_busid() {
     local usbipd="$1"
     local busid="$2"
@@ -175,6 +215,8 @@ attach_usbipd_busid() {
         echo "Ошибка: устройство не появилось в /dev/ttyACM* или /dev/ttyUSB* после attach." >&2
         return 1
     fi
+
+    warmup_serial_devices
 
     save_usbipd_baseline "$usbipd"
 }
@@ -278,5 +320,5 @@ if [ -z "$UPLOAD_PORT" ]; then
 fi
 
 cd "$PROJECT_DIR"
-"$PYTHON" -m platformio run --target upload ${UPLOAD_PORT:+--upload-port "$UPLOAD_PORT"}
+flash_with_retry "$UPLOAD_PORT"
 "$PYTHON" -m platformio device monitor --baud 115200 ${UPLOAD_PORT:+--port "$UPLOAD_PORT"}
