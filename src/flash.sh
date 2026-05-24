@@ -275,7 +275,7 @@ attach_usbipd_device_interactive() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/.." && pwd))"
 PROJECT_DIR="$(find_project_dir "${1:-.}")"
 
 if [ -z "$PROJECT_DIR" ]; then
