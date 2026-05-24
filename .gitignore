@@ -8,4 +8,4 @@ env
 
 .envrc
 
-
+*.backup-*
