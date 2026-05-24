@@ -31,12 +31,12 @@ In EdgeTX/OpenTX model setup:
 Open the serial monitor at `115200`. The default output is:
 
 ```text
-LJ(X:0.50|Y:0.50) RJ(X:0.50|Y:0.50) A:0 B:1 C:0 D:1 E:0 F:2 S1:0.42 S2:0.77
+LJ(X:+0.00|Y:+0.00) RJ(X:+0.00|Y:+0.00) A:0 B:1 C:2 D:1 E:0 F:2 S1:0.42 S2:0.77
 ```
 
 Values:
 
-- `LJ` and `RJ` are left/right stick `X/Y`, normalized to `0.00..1.00`.
+- `LJ` and `RJ` are left/right stick `X/Y`, normalized to `-1.00..+1.00`.
 - `A` and `D` are two-state buttons, printed as `0` or `1`.
 - `B`, `C`, `E`, and `F` are three-state switches, printed as `0`, `1`, or `2`.
 - `S1` and `S2` are knobs, normalized to `0.00..1.00`.
@@ -49,12 +49,12 @@ Default channel map:
 | CH2 | RJ Y |
 | CH3 | LJ Y |
 | CH4 | LJ X |
-| CH5 | A |
-| CH6 | B |
-| CH7 | C |
-| CH8 | D |
-| CH9 | E |
-| CH10 | F |
+| CH5 | E |
+| CH6 | F |
+| CH7 | B |
+| CH8 | C |
+| CH9 | A |
+| CH10 | D |
 | CH11 | S1 |
 | CH12 | S2 |
 

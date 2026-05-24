@@ -402,6 +402,10 @@ float normalizeCrsf01(uint16_t raw) {
     return constrain(value, 0.0f, 1.0f);
 }
 
+float normalizeCrsfStick(uint16_t raw) {
+    return normalizeCrsf01(raw) * 2.0f - 1.0f;
+}
+
 uint8_t normalizeCrsfButton(uint16_t raw) {
     return normalizeCrsf01(raw) >= 0.5f ? 1 : 0;
 }
@@ -421,29 +425,37 @@ void printFloat2(float value) {
     Serial.print(value, 2);
 }
 
-void printTx12StateFromCrsf() {
-    const float rjX = normalizeCrsf01(crsfChannels[0]); // CH1: roll/aileron
-    const float rjY = normalizeCrsf01(crsfChannels[1]); // CH2: pitch/elevator
-    const float ljY = normalizeCrsf01(crsfChannels[2]); // CH3: throttle
-    const float ljX = normalizeCrsf01(crsfChannels[3]); // CH4: yaw/rudder
+void printSignedFloat2(float value) {
+    if (value >= 0.0f) {
+        Serial.print('+');
+    }
+    Serial.print(value, 2);
+}
 
-    const uint8_t a = normalizeCrsfButton(crsfChannels[4]);
-    const uint8_t b = normalizeCrsfThreeState(crsfChannels[5]);
-    const uint8_t c = normalizeCrsfThreeState(crsfChannels[6]);
-    const uint8_t d = normalizeCrsfButton(crsfChannels[7]);
-    const uint8_t e = normalizeCrsfThreeState(crsfChannels[8]);
-    const uint8_t f = normalizeCrsfThreeState(crsfChannels[9]);
+void printTx12StateFromCrsf() {
+    const float rjX = normalizeCrsfStick(crsfChannels[0]); // CH1: roll/aileron
+    const float rjY = normalizeCrsfStick(crsfChannels[1]); // CH2: pitch/elevator
+    const float ljY = normalizeCrsfStick(crsfChannels[2]); // CH3: throttle
+    const float ljX = normalizeCrsfStick(crsfChannels[3]); // CH4: yaw/rudder
+
+    // TX12 controls as observed from this transmitter's CRSF channel order.
+    const uint8_t a = normalizeCrsfButton(crsfChannels[8]);      // CH9
+    const uint8_t b = normalizeCrsfThreeState(crsfChannels[6]);  // CH7
+    const uint8_t c = normalizeCrsfThreeState(crsfChannels[7]);  // CH8
+    const uint8_t d = normalizeCrsfButton(crsfChannels[9]);      // CH10
+    const uint8_t e = normalizeCrsfThreeState(crsfChannels[4]);  // CH5
+    const uint8_t f = normalizeCrsfThreeState(crsfChannels[5]);  // CH6
     const float s1 = normalizeCrsf01(crsfChannels[10]);
     const float s2 = normalizeCrsf01(crsfChannels[11]);
 
     Serial.print("LJ(X:");
-    printFloat2(ljX);
+    printSignedFloat2(ljX);
     Serial.print("|Y:");
-    printFloat2(ljY);
+    printSignedFloat2(ljY);
     Serial.print(") RJ(X:");
-    printFloat2(rjX);
+    printSignedFloat2(rjX);
     Serial.print("|Y:");
-    printFloat2(rjY);
+    printSignedFloat2(rjY);
     Serial.print(") A:");
     Serial.print(a);
     Serial.print(" B:");
@@ -460,6 +472,10 @@ void printTx12StateFromCrsf() {
     printFloat2(s1);
     Serial.print(" S2:");
     printFloat2(s2);
+    Serial.print(" rawS1:");
+    Serial.print(crsfChannels[10]);
+    Serial.print(" rawS2:");
+    Serial.print(crsfChannels[11]);
     Serial.println();
 }
 
