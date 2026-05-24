@@ -9,3 +9,8 @@ env
 .envrc
 
 *.backup-*
+
+# Nested repos and local agent metadata
+.git/
+.codex/
+.agents/
