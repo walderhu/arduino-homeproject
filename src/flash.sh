@@ -25,25 +25,93 @@ find_project_dir() {
     return 1
 }
 
-find_serial_device() {
-    local device
-
-    for device in /dev/ttyACM* /dev/ttyUSB*; do
-        if [ -e "$device" ]; then
-            printf '%s\n' "$device"
-            return 0
-        fi
-    done
-
-    return 1
+list_project_dirs() {
+    find "$SCRIPT_DIR" -name platformio.ini \
+        ! -path '*/.pio/*' \
+        ! -path '*/build/*' \
+        -print \
+        | sed 's#/platformio\.ini$##' \
+        | sort
 }
 
-wait_for_serial_device() {
+choose_from_list() {
+    local prompt="$1"
+    shift
+    local items=("$@")
+    local choice
+
+    if [ "${#items[@]}" -eq 0 ]; then
+        return 1
+    fi
+
+    if [ "${#items[@]}" -eq 1 ]; then
+        printf '%s\n' "${items[0]}"
+        return 0
+    fi
+
+    printf '%s\n' "$prompt" >&2
+    for i in "${!items[@]}"; do
+        printf '  %d) %s\n' "$((i + 1))" "${items[$i]}" >&2
+    done
+
+    while true; do
+        read -r -p '> ' choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#items[@]}" ]; then
+            printf '%s\n' "${items[$((choice - 1))]}"
+            return 0
+        fi
+        echo "Введите номер от 1 до ${#items[@]}" >&2
+    done
+}
+
+choose_usbipd_busid() {
+    local choice
+    local busid
+
+    printf '%s\n' "Какую USB-плату подключить:" >&2
+    for i in "${!USBIPD_LINES[@]}"; do
+        busid="$(awk '{ print $1 }' <<< "${USBIPD_LINES[$i]}")"
+        printf '  %d) %s  %s\n' "$((i + 1))" "$busid" "${USBIPD_LINES[$i]#"$busid"}" >&2
+    done
+
+    while true; do
+        read -r -p '> ' choice
+
+        if [[ "$choice" =~ ^[0-9]+-[0-9]+$ ]]; then
+            for line in "${USBIPD_LINES[@]}"; do
+                busid="$(awk '{ print $1 }' <<< "$line")"
+                if [ "$choice" = "$busid" ]; then
+                    printf '%s\n' "$line"
+                    return 0
+                fi
+            done
+        fi
+
+        if [[ "$choice" =~ ^[0-9]+$ ]]; then
+            for line in "${USBIPD_LINES[@]}"; do
+                busid="$(awk '{ print $1 }' <<< "$line")"
+                if [ "$choice" = "${busid#*-}" ]; then
+                    printf '%s\n' "$line"
+                    return 0
+                fi
+            done
+        fi
+
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#USBIPD_LINES[@]}" ]; then
+            printf '%s\n' "${USBIPD_LINES[$((choice - 1))]}"
+            return 0
+        fi
+
+        echo "Введите номер пункта, USB-номер или busid, например 1, 2 или 1-2" >&2
+    done
+}
+
+wait_for_ttyusb() {
     local timeout_sec="${1:-10}"
     local elapsed=0
 
     while [ "$elapsed" -lt "$timeout_sec" ]; do
-        if find_serial_device >/dev/null; then
+        if ls /dev/ttyUSB* >/dev/null 2>&1; then
             return 0
         fi
 
@@ -54,228 +122,9 @@ wait_for_serial_device() {
     return 1
 }
 
-print_usbipd_connected() {
-    local usbipd="$1"
-
-    "$usbipd" list | tr -d '\r' | sed '/^Persisted:/,$d'
-}
-
-print_usbipd_connected_rows() {
-    local usbipd="$1"
-
-    print_usbipd_connected "$usbipd" | awk '$1 ~ /^[0-9]+-[0-9]+$/ { print }'
-}
-
-save_usbipd_baseline() {
-    local usbipd="$1"
-
-    if [ -n "${USBIPD_BASELINE_FILE:-}" ]; then
-        print_usbipd_connected_rows "$usbipd" >"$USBIPD_BASELINE_FILE"
-    fi
-
-    return 0
-}
-
-print_usbipd_added_devices() {
-    local usbipd="$1"
-    local before
-    local after
-    local added
-
-    before="$(mktemp)"
-    after="$(mktemp)"
-
-    if [ -n "${USBIPD_BASELINE_FILE:-}" ] && [ -s "$USBIPD_BASELINE_FILE" ]; then
-        cp "$USBIPD_BASELINE_FILE" "$before"
-    else
-        echo "Baseline usbipd не найден. Отключите ESP32/USB-устройство и нажмите Enter."
-        read -r
-        print_usbipd_connected_rows "$usbipd" >"$before"
-
-        echo "Подключите ESP32/USB-устройство и нажмите Enter."
-        read -r
-    fi
-
-    print_usbipd_connected_rows "$usbipd" >"$after"
-
-    added="$(grep -Fvx -f "$before" "$after" || true)"
-    rm -f "$before" "$after"
-
-    if [ -z "$added" ]; then
-        echo "Новых USB-устройств не найдено."
-        return 1
-    fi
-
-    echo "Новые USB-устройства:"
-    printf '%s\n' "$added"
-}
-
-recapture_usbipd_added_devices() {
-    local usbipd="$1"
-
-    echo "Отключите ESP32/USB-устройство и нажмите Enter."
-    read -r
-    save_usbipd_baseline "$usbipd"
-
-    echo "Подключите ESP32/USB-устройство и нажмите Enter."
-    read -r
-    print_usbipd_added_devices "$usbipd"
-}
-
-get_usbipd_added_busids() {
-    local usbipd="$1"
-    local before
-    local after
-
-    if [ -z "${USBIPD_BASELINE_FILE:-}" ] || [ ! -s "$USBIPD_BASELINE_FILE" ]; then
-        return 1
-    fi
-
-    before="$(mktemp)"
-    after="$(mktemp)"
-
-    cp "$USBIPD_BASELINE_FILE" "$before"
-    print_usbipd_connected_rows "$usbipd" >"$after"
-    grep -Fvx -f "$before" "$after" | awk '{ print $1 }' || true
-    rm -f "$before" "$after"
-}
-
-normalize_usbipd_busid() {
-    local usbipd="$1"
-    local input="$2"
-    local busid
-
-    if [[ "$input" =~ ^[0-9]+-[0-9]+$ ]]; then
-        printf '%s\n' "$input"
-        return 0
-    fi
-
-    if [[ ! "$input" =~ ^[0-9]+$ ]]; then
-        return 1
-    fi
-
-    busid="$(print_usbipd_connected_rows "$usbipd" | awk -v suffix="-$input" '$1 ~ suffix "$" { print $1; exit }')"
-
-    if [ -z "$busid" ]; then
-        return 1
-    fi
-
-    printf '%s\n' "$busid"
-}
-
-warmup_serial_devices() {
-    local device
-    local warmed=0
-
-    for device in /dev/ttyACM* /dev/ttyUSB*; do
-        if [ -e "$device" ]; then
-            echo "Прогрев serial-порта: $device"
-            stty -F "$device" 115200 2>/dev/null || true
-            warmed=1
-        fi
-    done
-
-    if [ "$warmed" -eq 1 ]; then
-        sleep 2
-    fi
-}
-
-flash_with_retry() {
-    local port="${1:-}"
-
-    echo "--- Прошивка: ${port:-platformio default} ---"
-    if [ -n "$port" ]; then
-        if "$PYTHON" -m platformio run --target upload --upload-port "$port"; then
-            return 0
-        fi
-    else
-        if "$PYTHON" -m platformio run --target upload; then
-            return 0
-        fi
-    fi
-
-    echo "--- Повтор через 3s: ${port:-platformio default} ---" >&2
-    sleep 3
-    if [ -n "$port" ]; then
-        "$PYTHON" -m platformio run --target upload --upload-port "$port"
-    else
-        "$PYTHON" -m platformio run --target upload
-    fi
-}
-
-attach_usbipd_busid() {
-    local usbipd="$1"
-    local busid="$2"
-
-    echo "Подключаю USB-устройство $busid в WSL..."
-    "$usbipd" bind --busid "$busid" || true
-    "$usbipd" attach --wsl --busid "$busid" || true
-
-    if ! wait_for_serial_device 10; then
-        echo "Ошибка: устройство не появилось в /dev/ttyACM* или /dev/ttyUSB* после attach." >&2
-        return 1
-    fi
-
-    warmup_serial_devices
-
-    save_usbipd_baseline "$usbipd"
-}
-
-attach_usbipd_device_interactive() {
-    local usbipd="$1"
-    local busid
-    local added_busids
-    local added_count
-
-    echo "ESP32 не найдена в /dev/ttyACM* или /dev/ttyUSB*."
-
-    added_busids="$(get_usbipd_added_busids "$usbipd" || true)"
-    added_count="$(printf '%s\n' "$added_busids" | awk 'NF { count++ } END { print count + 0 }')"
-
-    if [ "$added_count" -eq 1 ]; then
-        busid="$added_busids"
-        echo "Найдено новое USB-устройство: $busid"
-
-        if attach_usbipd_busid "$usbipd" "$busid"; then
-            return 0
-        fi
-
-        echo "Автоподключение не сработало, показываю список вручную." >&2
-    elif [ "$added_count" -gt 1 ]; then
-        echo "Найдено несколько новых USB-устройств:"
-        printf '%s\n' "$added_busids"
-        echo
-    fi
-
-    echo "Доступные USB-устройства Windows:"
-    print_usbipd_connected "$usbipd"
-
-    if [ "$added_count" -ne 1 ] && [ -n "${USBIPD_BASELINE_FILE:-}" ] && [ -s "$USBIPD_BASELINE_FILE" ]; then
-        echo
-        print_usbipd_added_devices "$usbipd" || true
-    fi
-
-    echo
-    read -r -p "Введите номер USB (например 2 для 1-2), полный BUSID, d для diff, или q/любую букву для выхода: " busid
-
-    if [[ "$busid" =~ ^[dD]$ ]]; then
-        recapture_usbipd_added_devices "$usbipd" || exit 1
-        echo
-        read -r -p "Введите номер USB из diff (например 2 для 1-2), полный BUSID, или q/любую букву для выхода: " busid
-    fi
-
-    if ! busid="$(normalize_usbipd_busid "$usbipd" "$busid")"; then
-        echo "Выход: устройство не выбрано." >&2
-        exit 1
-    fi
-
-    if ! attach_usbipd_busid "$usbipd" "$busid"; then
-        exit 1
-    fi
-}
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/.." && pwd))"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
 PROJECT_DIR="$(find_project_dir "${1:-.}")"
 
 if [ -z "$PROJECT_DIR" ]; then
@@ -285,7 +134,6 @@ fi
 
 VENV_DIR="${ESP32_LEVEL_VENV:-$REPO_ROOT/.venv}"
 PYTHON="$VENV_DIR/bin/python"
-UPLOAD_PORT="${UPLOAD_PORT:-}"
 
 if [ ! -x "$PYTHON" ]; then
     echo "Не найден PlatformIO в $VENV_DIR" >&2
@@ -310,15 +158,57 @@ if grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null; then
         exit 1
     fi
 
-    if ! UPLOAD_PORT="$(find_serial_device)"; then
-        attach_usbipd_device_interactive "$USBIPD"
+    mapfile -t USBIPD_LINES < <("$USBIPD" list 2>/dev/null | tr -d '\r' | awk '/CP210x|CH340/ && $1 ~ /^[0-9]+-[0-9]+$/ { print }')
+
+    if [ "${#USBIPD_LINES[@]}" -eq 0 ]; then
+        echo "Ошибка: ESP32 не подключена (CP210x/CH340 не найден)." >&2
+        exit 1
+    fi
+
+    SELECTED_USBIPD_LINE="$(choose_usbipd_busid)"
+    SELECTED_BUSID="$(awk '{ print $1 }' <<< "$SELECTED_USBIPD_LINE")"
+
+    if grep -q 'Attached' <<< "$SELECTED_USBIPD_LINE"; then
+        echo "usbipd already attached: $SELECTED_BUSID"
+    else
+        echo "usbipd attach: $SELECTED_BUSID"
+        "$USBIPD" bind --busid "$SELECTED_BUSID" 2>/dev/null || true
+        "$USBIPD" attach --wsl --busid "$SELECTED_BUSID" 2>/dev/null || true
+
+        if ! wait_for_ttyusb 10; then
+            echo "Ошибка: устройство не появилось в /dev/ttyUSB* после attach." >&2
+            exit 1
+        fi
+
+        # prime cp210x uart driver after cold attach — prevents garbage crystal read
+        for dev in /dev/ttyUSB*; do
+            stty -F "$dev" 115200 2>/dev/null || true
+        done
+        sleep 2
+    fi
+
+    if ! ls /dev/ttyUSB* >/dev/null 2>&1; then
+        echo "Ошибка: /dev/ttyUSB* недоступен." >&2
+        exit 1
     fi
 fi
 
-if [ -z "$UPLOAD_PORT" ]; then
-    UPLOAD_PORT="$(find_serial_device || true)"
-fi
-
 cd "$PROJECT_DIR"
-flash_with_retry "$UPLOAD_PORT"
-"$PYTHON" -m platformio device monitor --baud 115200 ${UPLOAD_PORT:+--port "$UPLOAD_PORT"}
+
+TTYUSB_PORTS=(/dev/ttyUSB*)
+echo "Устройств: ${#TTYUSB_PORTS[@]} (${TTYUSB_PORTS[*]})"
+FLASH_PORT="$(choose_from_list "Через какой порт шить:" "${TTYUSB_PORTS[@]}")"
+
+flash_port() {
+    local port="$1"
+    echo "--- Прошивка: $port ---"
+    if ! "$PYTHON" -m platformio run --target upload --upload-port "$port"; then
+        echo "--- Повтор через 3s: $port ---"
+        sleep 3
+        "$PYTHON" -m platformio run --target upload --upload-port "$port"
+    fi
+}
+
+flash_port "$FLASH_PORT"
+
+# "$PYTHON" -m platformio device monitor --port "$FLASH_PORT" --baud 115200
