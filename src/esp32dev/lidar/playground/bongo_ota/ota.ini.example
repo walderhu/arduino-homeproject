@@ -1,0 +1,4 @@
+; Copy this file to ota.ini and set your ESP32 IP address.
+; Example after USB flash, from Serial Monitor: "WiFi connected, IP: 192.168.1.42"
+[env:esp32dev_ota]
+upload_port = 192.168.1.42

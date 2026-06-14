@@ -1,5 +1,9 @@
 .pio/
 config.h
+src/esp32dev/lidar/lock.h
+src/esp32dev/lidar/ota.ini
+src/esp32dev/lidar/playground/bongo_ota/lock.h
+src/esp32dev/lidar/playground/bongo_ota/ota.ini
 
 examples
 .venv

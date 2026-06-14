@@ -1,0 +1,7 @@
+#pragma once
+
+#define ssid "your-wifi-ssid"
+#define password "your-wifi-password"
+
+#define ota_hostname "esp32-lidar"
+#define ota_password "lidar-ota"
