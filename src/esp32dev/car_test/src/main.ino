@@ -31,6 +31,14 @@ static constexpr uint8_t OLED_ADDR = 0x3C;
 static constexpr uint8_t OLED_WIDTH = 128;
 static constexpr uint8_t OLED_HEIGHT = 64;
 static constexpr int8_t OLED_RESET = -1;
+static constexpr uint8_t SERVO_PIN = 15;
+static constexpr uint8_t SERVO_LEDC_CHANNEL = 1;
+static constexpr uint8_t SERVO_LEDC_RES_BITS = 16;
+static constexpr uint16_t SERVO_PWM_HZ = 50;
+static constexpr uint16_t SERVO_MIN_US = 500;
+static constexpr uint16_t SERVO_MAX_US = 2500;
+static constexpr bool SERVO_SELF_TEST = false;
+static constexpr uint32_t SERVO_SELF_TEST_STEP_MS = 1500;
 
 static constexpr uint32_t SERIAL_MONITOR_BAUD = 115200;
 static constexpr uint32_t MODULE_UART_BAUD = 420000; // CRSF default
@@ -43,13 +51,10 @@ static constexpr uint16_t PPM_MIN_US = 800;
 static constexpr uint16_t PPM_MAX_US = 2400;
 static constexpr uint16_t PPM_FRAME_GAP_US = 3500;
 static constexpr uint32_t PRINT_INTERVAL_MS = 500;
-static constexpr uint32_t DISPLAY_INTERVAL_MS = 50;
+static constexpr uint32_t DISPLAY_INTERVAL_MS = 150;
 static constexpr uint32_t DISPLAY_PAGE_INTERVAL_MS = 2500;
 static constexpr uint32_t CRSF_AUTOSCAN_INTERVAL_MS = 2000;
 static constexpr uint32_t SIGNAL_TIMEOUT_MS = 1000;
-static constexpr uint32_t HOME_IDLE_TIMEOUT_MS = 3000;
-static constexpr uint32_t BOTH_STICKS_HOLD_MS = 1000;
-static constexpr uint16_t STICK_ACTION_DELTA = 28;
 static constexpr uint8_t POT_ACTION_DELTA_PERCENT = 2;
 static constexpr bool PRINT_PPM_STATUS = false;
 static constexpr bool PRINT_RAW_CHANNELS = false;
@@ -195,7 +200,6 @@ static constexpr uint8_t ACTION_SD = 6;
 static constexpr uint8_t ACTION_SE = 7;
 static constexpr uint8_t ACTION_S1 = 8;
 static constexpr uint8_t ACTION_AUX = 9;
-static constexpr uint8_t ACTION_BOTH_STICKS = 10;
 
 struct LastAction {
     uint8_t type = ACTION_NONE;
@@ -207,7 +211,10 @@ struct LastAction {
 LastAction lastAction;
 uint16_t previousActionChannels[MAX_CHANNELS] = {};
 bool previousActionReady = false;
-uint32_t bothSticksUntilMs = 0;
+uint16_t lastServoPulseUs = 0;
+float currentServoAngleDeg = 90.0f;
+
+void updateServoFromRx();
 
 bool isCrsfAddress(uint8_t value) {
     switch (value) {
@@ -266,11 +273,15 @@ void decodeCrsfPacket(const uint8_t *packet, uint8_t packetSize) {
     }
 
     const uint8_t *payload = &packet[3];
-    for (uint8_t ch = 0; ch < MAX_CHANNELS; ++ch) {
-        crsfChannels[ch] = read11Bits(payload, ch);
-    }
+    crsfChannels[0] = read11Bits(payload, 0);
     crsfFrameCounter++;
     crsfLastFrameMs = millis();
+    if (!SERVO_SELF_TEST) {
+        updateServoFromRx();
+    }
+    for (uint8_t ch = 1; ch < MAX_CHANNELS; ++ch) {
+        crsfChannels[ch] = read11Bits(payload, ch);
+    }
 }
 
 void resetSerialDecoders() {
@@ -287,6 +298,7 @@ void startModuleSerial(uint8_t profileIndex) {
     resetSerialDecoders();
     ModuleSerial.end();
     delay(20);
+    ModuleSerial.setRxBufferSize(1024);
     ModuleSerial.begin(profile.baud, profile.config, MODULE_RX_PIN, MODULE_TX_PIN,
                        profile.inverted);
 
@@ -446,7 +458,9 @@ float normalizeCrsf01(uint16_t raw) {
     return constrain(value, 0.0f, 1.0f);
 }
 
-float normalizeCrsfStick(uint16_t raw) { return normalizeCrsf01(raw) * 2.0f - 1.0f; }
+float normalizeCrsfStick(uint16_t raw) {
+    return -(normalizeCrsf01(raw) * 2.0f - 1.0f);
+}
 
 uint8_t normalizeCrsfButton(uint16_t raw) { return normalizeCrsf01(raw) >= 0.5f ? 1 : 0; }
 
@@ -512,10 +526,6 @@ char threeStateShort(uint16_t raw) {
     }
 }
 
-uint16_t rawDelta(uint16_t a, uint16_t b) {
-    return a > b ? a - b : b - a;
-}
-
 void setLastAction(uint8_t type, uint8_t channel, const char *value) {
     lastAction.type = type;
     lastAction.channel = channel;
@@ -538,28 +548,6 @@ void updateLastActionFromCrsf() {
         previousActionReady = true;
         setLastAction(ACTION_NONE, 0, "--");
         return;
-    }
-
-    const uint16_t leftDelta =
-        max(rawDelta(crsfChannels[2], previousActionChannels[2]),
-            rawDelta(crsfChannels[3], previousActionChannels[3]));
-    const uint16_t rightDelta =
-        max(rawDelta(crsfChannels[0], previousActionChannels[0]),
-            rawDelta(crsfChannels[1], previousActionChannels[1]));
-
-    const bool leftMoved = leftDelta >= STICK_ACTION_DELTA;
-    const bool rightMoved = rightDelta >= STICK_ACTION_DELTA;
-
-    if (leftMoved && rightMoved) {
-        bothSticksUntilMs = millis() + BOTH_STICKS_HOLD_MS;
-        setLastAction(ACTION_BOTH_STICKS, 0, "LR");
-    } else if (millis() < bothSticksUntilMs &&
-               (lastAction.type == ACTION_BOTH_STICKS || leftMoved || rightMoved)) {
-        setLastAction(ACTION_BOTH_STICKS, 0, "LR");
-    } else if (leftMoved) {
-        setLastAction(ACTION_LEFT_STICK, 0, "LJ");
-    } else if (rightMoved) {
-        setLastAction(ACTION_RIGHT_STICK, 0, "RJ");
     }
 
     if (twoStateShort(crsfChannels[4]) != twoStateShort(previousActionChannels[4])) {
@@ -690,47 +678,24 @@ void drawStickWidget(int16_t x, int16_t y, int16_t w, int16_t h, float stickX, f
     display.fillCircle(dotX, dotY, 2, SSD1306_WHITE);
 }
 
-void drawCrsfOverviewPage() {
-    const float rjX = normalizeCrsfStick(crsfChannels[0]);
-    const float rjY = normalizeCrsfStick(crsfChannels[1]);
-    const float ljY = normalizeCrsfStick(crsfChannels[2]);
-    const float ljX = normalizeCrsfStick(crsfChannels[3]);
+void drawStickAction(bool leftStick);
 
-    drawStickWidget(0, 12, 29, 29, ljX, ljY, "LJ");
-    drawStickWidget(33, 12, 29, 29, rjX, rjY, "RJ");
+void drawCrsfLivePage() {
+    drawStickAction(false);
 
-    display.setCursor(66, 12);
-    display.print("S1:");
-    display.print(potPercent(crsfChannels[9]));
-    display.print('%');
-
-    display.setCursor(66, 22);
+    display.setTextSize(1);
+    display.setCursor(0, 55);
     display.print("SA:");
     display.print(twoStateShort(crsfChannels[4]));
     display.print(" SB:");
     display.print(threeStateShort(crsfChannels[5]));
+    display.print(" S1:");
+    display.print(potPercent(crsfChannels[9]));
+    display.print('%');
+}
 
-    display.setCursor(66, 32);
-    display.print("SC:");
-    display.print(threeStateShort(crsfChannels[6]));
-    display.print(" SD:");
-    display.print(twoStateShort(crsfChannels[7]));
-
-    display.setCursor(66, 42);
-    display.print("SE:");
-    display.print(twoStateShort(crsfChannels[8]));
-    display.print(" CH11:");
-    display.print(channelPercent(crsfChannels[10]));
-
-    display.setCursor(0, 55);
-    display.print("LX");
-    printSignedPercent(stickPercent(crsfChannels[3]));
-    display.print(" LY");
-    printSignedPercent(stickPercent(crsfChannels[2]));
-    display.print(" RX");
-    printSignedPercent(stickPercent(crsfChannels[0]));
-    display.print(" RY");
-    printSignedPercent(stickPercent(crsfChannels[1]));
+void drawCrsfOverviewPage() {
+    drawCrsfLivePage();
 }
 
 void drawLargeTextCentered(const char *text, uint8_t textSize, int16_t y) {
@@ -805,42 +770,8 @@ void drawStickAction(bool leftStick) {
     display.setTextSize(1);
 }
 
-void drawBothSticksAction() {
-    const float ljX = normalizeCrsfStick(crsfChannels[3]);
-    const float ljY = normalizeCrsfStick(crsfChannels[2]);
-    const float rjX = normalizeCrsfStick(crsfChannels[0]);
-    const float rjY = normalizeCrsfStick(crsfChannels[1]);
-
-    drawStickWidget(2, 4, 34, 34, ljX, ljY, "");
-    drawStickWidget(90, 4, 34, 34, rjX, rjY, "");
-
-    display.setTextSize(1);
-    display.setCursor(0, 42);
-    display.print("LX:");
-    printSignedPercent(stickPercent(crsfChannels[3]));
-    display.setCursor(64, 42);
-    display.print("RX:");
-    printSignedPercent(stickPercent(crsfChannels[0]));
-
-    display.setCursor(0, 54);
-    display.print("LY:");
-    printSignedPercent(stickPercent(crsfChannels[2]));
-    display.setCursor(64, 54);
-    display.print("RY:");
-    printSignedPercent(stickPercent(crsfChannels[1]));
-}
-
 void drawLastActionPage() {
     switch (lastAction.type) {
-    case ACTION_BOTH_STICKS:
-        drawBothSticksAction();
-        return;
-    case ACTION_LEFT_STICK:
-        drawStickAction(true);
-        return;
-    case ACTION_RIGHT_STICK:
-        drawStickAction(false);
-        return;
     case ACTION_SA:
         drawSwitchAction("SA", lastAction.value);
         return;
@@ -866,30 +797,25 @@ void drawLastActionPage() {
         return;
     }
     default:
-        drawCrsfOverviewPage();
+        drawCrsfLivePage();
         return;
     }
 }
 
 void drawRemoteSearchPage(uint32_t nowMs) {
-    drawStickWidget(0, 12, 29, 29, 0.0f, 0.0f, "LJ");
-    drawStickWidget(33, 12, 29, 29, 0.0f, 0.0f, "RJ");
-
-    display.setCursor(67, 12);
+    display.setCursor(0, 16);
     display.print("SEARCH");
-    display.setCursor(67, 22);
+    display.setCursor(0, 28);
     display.print("RX ");
     display.print(uartByteCounter);
 
-    display.setCursor(67, 32);
+    display.setCursor(0, 40);
     display.print("pk ");
     display.print(crsfPacketCounter);
-
-    display.setCursor(67, 42);
-    display.print("crc ");
+    display.print(" crc ");
     display.print(crsfCrcFailCounter);
 
-    display.setCursor(0, 55);
+    display.setCursor(0, 52);
     display.print("Profile ");
     display.print(activeSerialProfile->name);
     display.print(" age ");
@@ -970,12 +896,19 @@ void updateOledDisplay() {
 
         if (hasSignal) {
             updateLastActionFromCrsf();
-            const bool showHome = lastAction.type == ACTION_NONE ||
-                                  nowMs - lastAction.updatedMs >= HOME_IDLE_TIMEOUT_MS;
-            if (showHome) {
-                drawCrsfOverviewPage();
-            } else {
+            switch (lastAction.type) {
+            case ACTION_SA:
+            case ACTION_SB:
+            case ACTION_SC:
+            case ACTION_SD:
+            case ACTION_SE:
+            case ACTION_S1:
+            case ACTION_AUX:
                 drawLastActionPage();
+                break;
+            default:
+                drawCrsfLivePage();
+                break;
             }
         } else {
             drawSignalHeader("CRSF", hasSignal);
@@ -1214,6 +1147,85 @@ void autoScanCrsfPolarity() {
     Serial.println("Auto-scan: switched CRSF polarity because UART bytes exist but no RC frame");
 }
 
+uint16_t servoPulseFromRx(uint16_t rxRaw) {
+    const float stick = constrain(normalizeCrsfStick(rxRaw), -1.0f, 1.0f);
+    const float pulse = (SERVO_MIN_US + SERVO_MAX_US) * 0.5f +
+                        stick * (SERVO_MAX_US - SERVO_MIN_US) * 0.5f;
+    return static_cast<uint16_t>(pulse + 0.5f);
+}
+
+float servoAngleFromRx(uint16_t rxRaw) {
+    const float stick = constrain(normalizeCrsfStick(rxRaw), -1.0f, 1.0f);
+    return (stick + 1.0f) * 90.0f;
+}
+
+uint32_t servoDutyFromPulseUs(uint16_t pulseUs) {
+    static constexpr uint32_t maxDuty = (1UL << SERVO_LEDC_RES_BITS) - 1;
+    static constexpr uint32_t periodUs = 1000000UL / SERVO_PWM_HZ;
+    return (static_cast<uint32_t>(pulseUs) * maxDuty) / periodUs;
+}
+
+void servoWritePulseUs(uint16_t pulseUs) {
+    lastServoPulseUs = constrain(pulseUs, SERVO_MIN_US, SERVO_MAX_US);
+    ledcWrite(SERVO_LEDC_CHANNEL, servoDutyFromPulseUs(lastServoPulseUs));
+}
+
+void servoBegin() {
+    pinMode(SERVO_PIN, OUTPUT);
+    ledcSetup(SERVO_LEDC_CHANNEL, SERVO_PWM_HZ, SERVO_LEDC_RES_BITS);
+    ledcAttachPin(SERVO_PIN, SERVO_LEDC_CHANNEL);
+    servoWritePulseUs((SERVO_MIN_US + SERVO_MAX_US) / 2);
+}
+
+void updateServoFromRx() {
+    currentServoAngleDeg = servoAngleFromRx(crsfChannels[0]);
+    servoWritePulseUs(servoPulseFromRx(crsfChannels[0]));
+}
+
+void updateServoSelfTest() {
+    static uint8_t lastStep = 255;
+    const uint8_t step = (millis() / SERVO_SELF_TEST_STEP_MS) % 4;
+    if (step == lastStep) {
+        return;
+    }
+    lastStep = step;
+
+    uint16_t pulseUs = (SERVO_MIN_US + SERVO_MAX_US) / 2;
+    const char *label = "CENTER";
+    if (step == 0) {
+        pulseUs = SERVO_MIN_US;
+        label = "MIN";
+    } else if (step == 1) {
+        pulseUs = (SERVO_MIN_US + SERVO_MAX_US) / 2;
+        label = "CENTER";
+    } else if (step == 2) {
+        pulseUs = SERVO_MAX_US;
+        label = "MAX";
+    }
+
+    servoWritePulseUs(pulseUs);
+    Serial.print("Servo self-test ");
+    Serial.print(label);
+    Serial.print(" pulse=");
+    Serial.println(pulseUs);
+
+    if (oledReady) {
+        display.clearDisplay();
+        display.setTextSize(2);
+        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+        display.setCursor(0, 8);
+        display.print("SERVO");
+        display.setCursor(0, 30);
+        display.print(label);
+        display.setTextSize(1);
+        display.setCursor(0, 54);
+        display.print("GPIO15 ");
+        display.print(pulseUs);
+        display.print("us");
+        display.display();
+    }
+}
+
 void setup() {
     Serial.begin(SERIAL_MONITOR_BAUD);
     delay(300);
@@ -1221,6 +1233,7 @@ void setup() {
     Serial.println();
     Serial.println("RadioMaster Pocket external module bay reader");
     Serial.println("OLED: SDA=21 SCL=22 addr=0x3C");
+    Serial.println("Servo: GPIO15 self-test MIN/CENTER/MAX enabled");
     Serial.println("PPM input: GPIO34, UART RX: GPIO16, GND common, GPIO max 3.3V");
     Serial.println("Commands: crsf, crsfinv, sbus, ibus, raw420, raw100, raw115");
 
@@ -1235,7 +1248,9 @@ void setup() {
 
     pinMode(PPM_PIN, INPUT);
     attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmInterrupt, CHANGE);
+    servoBegin();
 
+    ModuleSerial.setRxBufferSize(1024);
     ModuleSerial.begin(MODULE_UART_BAUD, SERIAL_8N1, MODULE_RX_PIN, MODULE_TX_PIN,
                        MODULE_UART_INVERTED);
     Serial.println("Default serial profile: crsf");
@@ -1244,7 +1259,20 @@ void setup() {
 void loop() {
     pollCommands();
     pollSerialProtocol();
+
+    if (SERVO_SELF_TEST) {
+        updateServoSelfTest();
+        pollSerialProtocol();
+        return;
+    }
+
     autoScanCrsfPolarity();
-    printStatus();
-    updateOledDisplay();
+
+    // OLED and serial logging block the main loop; defer them while CRSF bytes are waiting.
+    if (ModuleSerial.available() == 0) {
+        printStatus();
+        updateOledDisplay();
+    }
+
+    pollSerialProtocol();
 }

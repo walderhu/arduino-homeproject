@@ -1,9 +1,13 @@
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include <Arduino.h>
+#include <Wire.h>
 
 /*
   RadioMaster Pocket external module bay reader for ESP32.
 
   Wiring:
+    OLED SSD1306 I2C 128x64       -> SDA GPIO21, SCL GPIO22, VCC 3V3, GND
     Pocket nano bay PPM / RC signal  -> ESP32 GPIO34 through a 3.3V level shifter/divider
     Pocket nano bay CRSF/data signal -> ESP32 GPIO16 through a 3.3V level shifter/divider
     Pocket nano bay GND              -> ESP32 GND
@@ -21,6 +25,12 @@
 static constexpr uint8_t PPM_PIN = 34;       // input-only GPIO, good for PPM
 static constexpr uint8_t MODULE_RX_PIN = 16; // ESP32 RX from module bay data line
 static constexpr int8_t MODULE_TX_PIN = -1;  // unused; this sketch only listens
+static constexpr uint8_t I2C_SDA = 21;
+static constexpr uint8_t I2C_SCL = 22;
+static constexpr uint8_t OLED_ADDR = 0x3C;
+static constexpr uint8_t OLED_WIDTH = 128;
+static constexpr uint8_t OLED_HEIGHT = 64;
+static constexpr int8_t OLED_RESET = -1;
 
 static constexpr uint32_t SERIAL_MONITOR_BAUD = 115200;
 static constexpr uint32_t MODULE_UART_BAUD = 420000; // CRSF default
@@ -33,9 +43,13 @@ static constexpr uint16_t PPM_MIN_US = 800;
 static constexpr uint16_t PPM_MAX_US = 2400;
 static constexpr uint16_t PPM_FRAME_GAP_US = 3500;
 static constexpr uint32_t PRINT_INTERVAL_MS = 200;
+static constexpr uint32_t DISPLAY_INTERVAL_MS = 200;
 static constexpr uint32_t SIGNAL_TIMEOUT_MS = 1000;
 static constexpr bool PRINT_PPM_STATUS = false;
 static constexpr bool PRINT_RAW_CHANNELS = false;
+
+Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET);
+bool oledReady = false;
 
 // ================= PPM DECODER =================
 struct PpmEdgeDecoder {
@@ -432,6 +446,14 @@ void printSignedFloat2(float value) {
     Serial.print(value, 2);
 }
 
+int8_t stickPercent(uint16_t raw) {
+    return static_cast<int8_t>(roundf(normalizeCrsfStick(raw) * 100.0f));
+}
+
+uint8_t potPercent(uint16_t raw) {
+    return static_cast<uint8_t>(roundf(normalizeCrsf01(raw) * 100.0f));
+}
+
 void printPocketStateFromCrsf() {
     const float rjX = normalizeCrsfStick(crsfChannels[0]); // CH1: roll/aileron
     const float rjY = normalizeCrsfStick(crsfChannels[1]); // CH2: pitch/elevator
@@ -466,6 +488,154 @@ void printPocketStateFromCrsf() {
     Serial.print(" S1:");
     printFloat2(s1);
     Serial.println();
+}
+
+void showOledBootScreen() {
+    if (!oledReady) {
+        return;
+    }
+
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.println("RadioMaster Pocket");
+    display.println("OLED + RX test");
+    display.println();
+    display.print("OLED SDA ");
+    display.print(I2C_SDA);
+    display.print(" SCL ");
+    display.println(I2C_SCL);
+    display.print("UART RX GPIO ");
+    display.println(MODULE_RX_PIN);
+    display.print("Mode ");
+    display.println(activeSerialProfile->name);
+    display.display();
+}
+
+void drawSignalHeader(const char *label, bool hasSignal, uint32_t ageMs) {
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print(label);
+    display.print(' ');
+    display.print(activeSerialProfile->name);
+    display.setCursor(88, 0);
+    if (hasSignal) {
+        display.print("OK ");
+        display.print(ageMs);
+        display.print("ms");
+    } else {
+        display.print("NO SIG");
+    }
+    display.drawFastHLine(0, 9, OLED_WIDTH, SSD1306_WHITE);
+}
+
+void updateOledDisplay() {
+    if (!oledReady) {
+        return;
+    }
+
+    static uint32_t lastDisplayMs = 0;
+    const uint32_t nowMs = millis();
+    if (nowMs - lastDisplayMs < DISPLAY_INTERVAL_MS) {
+        return;
+    }
+    lastDisplayMs = nowMs;
+
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+    display.setTextSize(1);
+
+    if (isCrsfProfile()) {
+        const bool hasSignal = crsfLastFrameMs != 0 && nowMs - crsfLastFrameMs <= SIGNAL_TIMEOUT_MS;
+        drawSignalHeader("CRSF", hasSignal, hasSignal ? nowMs - crsfLastFrameMs : 0);
+
+        if (hasSignal) {
+            display.setCursor(0, 13);
+            display.print("LJ X");
+            display.print(stickPercent(crsfChannels[3]));
+            display.print(" Y");
+            display.print(stickPercent(crsfChannels[2]));
+
+            display.setCursor(0, 23);
+            display.print("RJ X");
+            display.print(stickPercent(crsfChannels[0]));
+            display.print(" Y");
+            display.print(stickPercent(crsfChannels[1]));
+
+            display.setCursor(0, 34);
+            display.print("SA");
+            display.print(normalizeCrsfButton(crsfChannels[4]));
+            display.print(" SB");
+            display.print(normalizeCrsfThreeState(crsfChannels[5]));
+            display.print(" SC");
+            display.print(normalizeCrsfThreeState(crsfChannels[6]));
+            display.print(" SD");
+            display.print(normalizeCrsfButton(crsfChannels[7]));
+            display.print(" SE");
+            display.print(normalizeCrsfButton(crsfChannels[8]));
+
+            display.setCursor(0, 45);
+            display.print("S1 ");
+            display.print(potPercent(crsfChannels[9]));
+            display.print("%  Frm ");
+            display.print(crsfFrameCounter);
+
+            display.setCursor(0, 56);
+            display.print("UART ");
+            display.print(uartByteCounter);
+            display.print(" CRC ");
+            display.print(crsfCrcFailCounter);
+        } else {
+            display.setCursor(0, 16);
+            display.println("Waiting for RC frame");
+            display.print("UART bytes ");
+            display.println(uartByteCounter);
+            display.print("Packets ");
+            display.print(crsfPacketCounter);
+            display.print(" CRC ");
+            display.println(crsfCrcFailCounter);
+            display.println("Try: crsf/crsfinv");
+        }
+    } else if (activeSerialProfile->profile == SerialProfile::Sbus) {
+        const bool hasSignal = sbusLastFrameMs != 0 && nowMs - sbusLastFrameMs <= SIGNAL_TIMEOUT_MS;
+        drawSignalHeader("SBUS", hasSignal, hasSignal ? nowMs - sbusLastFrameMs : 0);
+        display.setCursor(0, 16);
+        display.print("Frames ");
+        display.println(sbusFrameCounter);
+        display.print("Bad ");
+        display.println(sbusBadFrameCounter);
+        display.print("CH1 ");
+        display.print(sbusChannels[0]);
+        display.print(" CH2 ");
+        display.println(sbusChannels[1]);
+        display.print("UART ");
+        display.println(uartByteCounter);
+    } else if (activeSerialProfile->profile == SerialProfile::Ibus) {
+        const bool hasSignal = ibusLastFrameMs != 0 && nowMs - ibusLastFrameMs <= SIGNAL_TIMEOUT_MS;
+        drawSignalHeader("IBUS", hasSignal, hasSignal ? nowMs - ibusLastFrameMs : 0);
+        display.setCursor(0, 16);
+        display.print("Frames ");
+        display.println(ibusFrameCounter);
+        display.print("Bad ");
+        display.println(ibusBadFrameCounter);
+        display.print("CH1 ");
+        display.print(ibusChannels[0]);
+        display.print(" CH2 ");
+        display.println(ibusChannels[1]);
+        display.print("UART ");
+        display.println(uartByteCounter);
+    } else {
+        drawSignalHeader("RAW", uartByteCounter > 0, 0);
+        display.setCursor(0, 16);
+        display.print("UART bytes ");
+        display.println(uartByteCounter);
+        display.println("Use serial command:");
+        display.println("crsf crsfinv sbus");
+        display.println("ibus raw420 raw100");
+    }
+
+    display.display();
 }
 
 void printStatus() {
@@ -637,8 +807,17 @@ void setup() {
 
     Serial.println();
     Serial.println("RadioMaster Pocket external module bay reader");
+    Serial.println("OLED: SDA=21 SCL=22 addr=0x3C");
     Serial.println("PPM input: GPIO34, UART RX: GPIO16, GND common, GPIO max 3.3V");
     Serial.println("Commands: crsf, crsfinv, sbus, ibus, raw420, raw100, raw115");
+
+    Wire.begin(I2C_SDA, I2C_SCL);
+    oledReady = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+    if (oledReady) {
+        showOledBootScreen();
+    } else {
+        Serial.println("OLED not found at 0x3C. Try 0x3D or check SDA/SCL/VCC/GND.");
+    }
 
     pinMode(PPM_PIN, INPUT);
     attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmInterrupt, CHANGE);
@@ -652,4 +831,5 @@ void loop() {
     pollCommands();
     pollSerialProtocol();
     printStatus();
+    updateOledDisplay();
 }

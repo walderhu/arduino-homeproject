@@ -14,6 +14,16 @@ the external module bay.
 
 ## Wiring
 
+| OLED SSD1306 128x64 I2C | ESP32 |
+| --- | --- |
+| VCC | 3V3 |
+| GND | GND |
+| SDA | GPIO21 |
+| SCL | GPIO22 |
+
+OLED I2C address is `0x3C` by default. If your module uses `0x3D`, change
+`OLED_ADDR` in `src/main.ino`.
+
 | Pocket nano bay signal | Meaning | ESP32 |
 | --- | --- | --- |
 | PPM / RC signal | Optional PPM input | GPIO34 through level shifting |

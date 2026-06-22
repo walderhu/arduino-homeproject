@@ -237,4 +237,4 @@ flash_port() {
 
 flash_port "$FLASH_PORT"
 
-"$PYTHON" -m platformio device monitor --port "$FLASH_PORT" --baud 115200
+# "$PYTHON" -m platformio device monitor --port "$FLASH_PORT" --baud 115200
