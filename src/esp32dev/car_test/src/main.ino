@@ -11,6 +11,8 @@
     Pocket nano bay PPM / RC signal  -> ESP32 GPIO34 through a 3.3V level shifter/divider
     Pocket nano bay CRSF/data signal -> ESP32 GPIO16 through a 3.3V level shifter/divider
     Pocket nano bay GND              -> ESP32 GND
+    SE switch (CH9) high output      -> GPIO33, 3.3V when SE is ON
+    RY (CH2) PWM for MOSFET          -> GPIO25, 0..100% duty
 
   Do not connect bay power/VBAT directly to any ESP32 GPIO.
   Power the ESP32 from USB or a proper regulator.
@@ -32,6 +34,13 @@ static constexpr uint8_t OLED_WIDTH = 128;
 static constexpr uint8_t OLED_HEIGHT = 64;
 static constexpr int8_t OLED_RESET = -1;
 static constexpr uint8_t SERVO_PIN = 15;
+static constexpr uint8_t SE_OUTPUT_PIN = 33; // 3.3V out while SE (CH9) is ON
+static constexpr uint8_t SE_CRSF_CHANNEL = 8;
+static constexpr uint8_t RY_PWM_PIN = 25;
+static constexpr uint8_t RY_CRSF_CHANNEL = 1; // CH2: RJ Y
+static constexpr uint32_t RY_PWM_PERIOD_MS = 2000; // 2s cycle — slow soft-PWM for relay
+static constexpr uint8_t RY_PWM_MIN_ACTIVE_PERCENT = 55; // min ~1.1s ON at low stick
+static constexpr uint8_t RY_STICK_DEADZONE_PERCENT = 2;
 static constexpr uint8_t SERVO_LEDC_CHANNEL = 1;
 static constexpr uint8_t SERVO_LEDC_RES_BITS = 16;
 static constexpr uint16_t SERVO_PWM_HZ = 50;
@@ -213,8 +222,12 @@ uint16_t previousActionChannels[MAX_CHANNELS] = {};
 bool previousActionReady = false;
 uint16_t lastServoPulseUs = 0;
 float currentServoAngleDeg = 90.0f;
+uint8_t ryPwmTargetPercent = 0;
 
 void updateServoFromRx();
+void updateSeOutputFromRx();
+void updateRyPwmFromRx();
+void serviceRyPwmOutput();
 
 bool isCrsfAddress(uint8_t value) {
     switch (value) {
@@ -281,6 +294,10 @@ void decodeCrsfPacket(const uint8_t *packet, uint8_t packetSize) {
     }
     for (uint8_t ch = 1; ch < MAX_CHANNELS; ++ch) {
         crsfChannels[ch] = read11Bits(payload, ch);
+    }
+    if (!SERVO_SELF_TEST) {
+        updateSeOutputFromRx();
+        updateRyPwmFromRx();
     }
 }
 
@@ -1182,6 +1199,59 @@ void updateServoFromRx() {
     servoWritePulseUs(servoPulseFromRx(crsfChannels[0]));
 }
 
+void seOutputBegin() {
+    pinMode(SE_OUTPUT_PIN, OUTPUT);
+    digitalWrite(SE_OUTPUT_PIN, LOW);
+}
+
+void updateSeOutputFromRx() {
+    const bool enabled = normalizeCrsfButton(crsfChannels[SE_CRSF_CHANNEL]) != 0;
+    digitalWrite(SE_OUTPUT_PIN, enabled ? HIGH : LOW);
+}
+
+uint8_t ryPercentFromRx(uint16_t raw) {
+    uint8_t percent = static_cast<uint8_t>(roundf(normalizeCrsf01(raw) * 100.0f));
+    if (percent <= RY_STICK_DEADZONE_PERCENT) {
+        return 0;
+    }
+    return percent;
+}
+
+uint8_t ryPwmEffectivePercent(uint8_t stickPercent) {
+    if (stickPercent == 0) {
+        return 0;
+    }
+    return static_cast<uint8_t>(
+        RY_PWM_MIN_ACTIVE_PERCENT +
+        (static_cast<uint16_t>(stickPercent) * (100 - RY_PWM_MIN_ACTIVE_PERCENT)) / 100);
+}
+
+void ryPwmBegin() {
+    pinMode(RY_PWM_PIN, OUTPUT);
+    digitalWrite(RY_PWM_PIN, LOW);
+    ryPwmTargetPercent = 0;
+}
+
+void updateRyPwmFromRx() {
+    ryPwmTargetPercent = ryPwmEffectivePercent(ryPercentFromRx(crsfChannels[RY_CRSF_CHANNEL]));
+}
+
+void serviceRyPwmOutput() {
+    if (ryPwmTargetPercent == 0) {
+        digitalWrite(RY_PWM_PIN, LOW);
+        return;
+    }
+    if (ryPwmTargetPercent >= 100) {
+        digitalWrite(RY_PWM_PIN, HIGH);
+        return;
+    }
+
+    const uint32_t elapsed = millis() % RY_PWM_PERIOD_MS;
+    const uint32_t onMs =
+        (static_cast<uint32_t>(ryPwmTargetPercent) * RY_PWM_PERIOD_MS) / 100;
+    digitalWrite(RY_PWM_PIN, elapsed < onMs ? HIGH : LOW);
+}
+
 void updateServoSelfTest() {
     static uint8_t lastStep = 255;
     const uint8_t step = (millis() / SERVO_SELF_TEST_STEP_MS) % 4;
@@ -1234,6 +1304,14 @@ void setup() {
     Serial.println("RadioMaster Pocket external module bay reader");
     Serial.println("OLED: SDA=21 SCL=22 addr=0x3C");
     Serial.println("Servo: GPIO15 self-test MIN/CENTER/MAX enabled");
+    Serial.println("SE out: GPIO33 = 3.3V when SE (CH9) is ON");
+    Serial.print("RY PWM: GPIO");
+    Serial.print(RY_PWM_PIN);
+    Serial.print(" 0..100% period=");
+    Serial.print(RY_PWM_PERIOD_MS);
+    Serial.print("ms minActive=");
+    Serial.print(RY_PWM_MIN_ACTIVE_PERCENT);
+    Serial.println('%');
     Serial.println("PPM input: GPIO34, UART RX: GPIO16, GND common, GPIO max 3.3V");
     Serial.println("Commands: crsf, crsfinv, sbus, ibus, raw420, raw100, raw115");
 
@@ -1249,6 +1327,8 @@ void setup() {
     pinMode(PPM_PIN, INPUT);
     attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmInterrupt, CHANGE);
     servoBegin();
+    seOutputBegin();
+    ryPwmBegin();
 
     ModuleSerial.setRxBufferSize(1024);
     ModuleSerial.begin(MODULE_UART_BAUD, SERIAL_8N1, MODULE_RX_PIN, MODULE_TX_PIN,
@@ -1259,6 +1339,7 @@ void setup() {
 void loop() {
     pollCommands();
     pollSerialProtocol();
+    serviceRyPwmOutput();
 
     if (SERVO_SELF_TEST) {
         updateServoSelfTest();
