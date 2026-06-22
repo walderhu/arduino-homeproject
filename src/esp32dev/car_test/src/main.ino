@@ -47,6 +47,7 @@ static constexpr uint32_t DISPLAY_INTERVAL_MS = 50;
 static constexpr uint32_t DISPLAY_PAGE_INTERVAL_MS = 2500;
 static constexpr uint32_t CRSF_AUTOSCAN_INTERVAL_MS = 2000;
 static constexpr uint32_t SIGNAL_TIMEOUT_MS = 1000;
+static constexpr uint32_t HOME_IDLE_TIMEOUT_MS = 3000;
 static constexpr uint16_t STICK_ACTION_DELTA = 28;
 static constexpr uint8_t POT_ACTION_DELTA_PERCENT = 2;
 static constexpr bool PRINT_PPM_STATUS = false;
@@ -193,6 +194,7 @@ static constexpr uint8_t ACTION_SD = 6;
 static constexpr uint8_t ACTION_SE = 7;
 static constexpr uint8_t ACTION_S1 = 8;
 static constexpr uint8_t ACTION_AUX = 9;
+static constexpr uint8_t ACTION_BOTH_STICKS = 10;
 
 struct LastAction {
     uint8_t type = ACTION_NONE;
@@ -543,9 +545,14 @@ void updateLastActionFromCrsf() {
         max(rawDelta(crsfChannels[0], previousActionChannels[0]),
             rawDelta(crsfChannels[1], previousActionChannels[1]));
 
-    if (leftDelta >= STICK_ACTION_DELTA && leftDelta >= rightDelta) {
+    const bool leftMoved = leftDelta >= STICK_ACTION_DELTA;
+    const bool rightMoved = rightDelta >= STICK_ACTION_DELTA;
+
+    if (leftMoved && rightMoved) {
+        setLastAction(ACTION_BOTH_STICKS, 0, "LR");
+    } else if (leftMoved) {
         setLastAction(ACTION_LEFT_STICK, 0, "LJ");
-    } else if (rightDelta >= STICK_ACTION_DELTA) {
+    } else if (rightMoved) {
         setLastAction(ACTION_RIGHT_STICK, 0, "RJ");
     }
 
@@ -785,8 +792,37 @@ void drawStickAction(bool leftStick) {
     display.setTextSize(1);
 }
 
+void drawBothSticksAction() {
+    const float ljX = normalizeCrsfStick(crsfChannels[3]);
+    const float ljY = normalizeCrsfStick(crsfChannels[2]);
+    const float rjX = normalizeCrsfStick(crsfChannels[0]);
+    const float rjY = normalizeCrsfStick(crsfChannels[1]);
+
+    drawStickWidget(2, 4, 34, 34, ljX, ljY, "");
+    drawStickWidget(90, 4, 34, 34, rjX, rjY, "");
+
+    display.setTextSize(1);
+    display.setCursor(0, 43);
+    display.print("LX:");
+    display.print(stickPercent(crsfChannels[3]));
+    display.print(" LY:");
+    display.print(stickPercent(crsfChannels[2]));
+
+    display.setCursor(62, 43);
+    display.print("RX:");
+    display.print(stickPercent(crsfChannels[0]));
+    display.print(" RY:");
+    display.print(stickPercent(crsfChannels[1]));
+
+    display.setCursor(31, 55);
+    display.print("BOTH STICKS");
+}
+
 void drawLastActionPage() {
     switch (lastAction.type) {
+    case ACTION_BOTH_STICKS:
+        drawBothSticksAction();
+        return;
     case ACTION_LEFT_STICK:
         drawStickAction(true);
         return;
@@ -922,7 +958,13 @@ void updateOledDisplay() {
 
         if (hasSignal) {
             updateLastActionFromCrsf();
-            drawLastActionPage();
+            const bool showHome = lastAction.type == ACTION_NONE ||
+                                  nowMs - lastAction.updatedMs >= HOME_IDLE_TIMEOUT_MS;
+            if (showHome) {
+                drawCrsfOverviewPage();
+            } else {
+                drawLastActionPage();
+            }
         } else {
             drawSignalHeader("CRSF", hasSignal);
             drawRemoteSearchPage(nowMs);
