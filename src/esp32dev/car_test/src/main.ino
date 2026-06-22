@@ -48,6 +48,7 @@ static constexpr uint32_t DISPLAY_PAGE_INTERVAL_MS = 2500;
 static constexpr uint32_t CRSF_AUTOSCAN_INTERVAL_MS = 2000;
 static constexpr uint32_t SIGNAL_TIMEOUT_MS = 1000;
 static constexpr uint32_t HOME_IDLE_TIMEOUT_MS = 3000;
+static constexpr uint32_t BOTH_STICKS_HOLD_MS = 1000;
 static constexpr uint16_t STICK_ACTION_DELTA = 28;
 static constexpr uint8_t POT_ACTION_DELTA_PERCENT = 2;
 static constexpr bool PRINT_PPM_STATUS = false;
@@ -206,6 +207,7 @@ struct LastAction {
 LastAction lastAction;
 uint16_t previousActionChannels[MAX_CHANNELS] = {};
 bool previousActionReady = false;
+uint32_t bothSticksUntilMs = 0;
 
 bool isCrsfAddress(uint8_t value) {
     switch (value) {
@@ -549,6 +551,10 @@ void updateLastActionFromCrsf() {
     const bool rightMoved = rightDelta >= STICK_ACTION_DELTA;
 
     if (leftMoved && rightMoved) {
+        bothSticksUntilMs = millis() + BOTH_STICKS_HOLD_MS;
+        setLastAction(ACTION_BOTH_STICKS, 0, "LR");
+    } else if (millis() < bothSticksUntilMs &&
+               (lastAction.type == ACTION_BOTH_STICKS || leftMoved || rightMoved)) {
         setLastAction(ACTION_BOTH_STICKS, 0, "LR");
     } else if (leftMoved) {
         setLastAction(ACTION_LEFT_STICK, 0, "LJ");
@@ -666,6 +672,13 @@ void drawSignalHeader(const char *label, bool hasSignal) {
     display.drawFastHLine(0, 9, OLED_WIDTH, SSD1306_WHITE);
 }
 
+void printSignedPercent(int8_t value) {
+    if (value > 0) {
+        display.print('+');
+    }
+    display.print(value);
+}
+
 void drawStickWidget(int16_t x, int16_t y, int16_t w, int16_t h, float stickX, float stickY,
                      const char *label) {
     display.drawRect(x, y, w, h, SSD1306_WHITE);
@@ -711,13 +724,13 @@ void drawCrsfOverviewPage() {
 
     display.setCursor(0, 55);
     display.print("LX");
-    display.print(stickPercent(crsfChannels[3]));
+    printSignedPercent(stickPercent(crsfChannels[3]));
     display.print(" LY");
-    display.print(stickPercent(crsfChannels[2]));
+    printSignedPercent(stickPercent(crsfChannels[2]));
     display.print(" RX");
-    display.print(stickPercent(crsfChannels[0]));
+    printSignedPercent(stickPercent(crsfChannels[0]));
     display.print(" RY");
-    display.print(stickPercent(crsfChannels[1]));
+    printSignedPercent(stickPercent(crsfChannels[1]));
 }
 
 void drawLargeTextCentered(const char *text, uint8_t textSize, int16_t y) {
@@ -785,10 +798,10 @@ void drawStickAction(bool leftStick) {
     display.setTextSize(2);
     display.setCursor(44, 11);
     display.print(leftStick ? "LX:" : "RX:");
-    display.print(xPercent);
+    printSignedPercent(xPercent);
     display.setCursor(44, 35);
     display.print(leftStick ? "LY:" : "RY:");
-    display.print(yPercent);
+    printSignedPercent(yPercent);
     display.setTextSize(1);
 }
 
@@ -802,20 +815,19 @@ void drawBothSticksAction() {
     drawStickWidget(90, 4, 34, 34, rjX, rjY, "");
 
     display.setTextSize(1);
-    display.setCursor(0, 43);
+    display.setCursor(0, 42);
     display.print("LX:");
-    display.print(stickPercent(crsfChannels[3]));
-    display.print(" LY:");
-    display.print(stickPercent(crsfChannels[2]));
-
-    display.setCursor(62, 43);
+    printSignedPercent(stickPercent(crsfChannels[3]));
+    display.setCursor(64, 42);
     display.print("RX:");
-    display.print(stickPercent(crsfChannels[0]));
-    display.print(" RY:");
-    display.print(stickPercent(crsfChannels[1]));
+    printSignedPercent(stickPercent(crsfChannels[0]));
 
-    display.setCursor(31, 55);
-    display.print("BOTH STICKS");
+    display.setCursor(0, 54);
+    display.print("LY:");
+    printSignedPercent(stickPercent(crsfChannels[2]));
+    display.setCursor(64, 54);
+    display.print("RY:");
+    printSignedPercent(stickPercent(crsfChannels[1]));
 }
 
 void drawLastActionPage() {
