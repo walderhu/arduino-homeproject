@@ -31,6 +31,16 @@ OLED I2C address is `0x3C` by default. If your module uses `0x3D`, change
 | GND | Ground | GND |
 | CRSF/data/telemetry | Module serial data | GPIO16 RX through level shifting |
 
+| L298N channel B | ESP32 / motor |
+| --- | --- |
+| ENB | GPIO27 PWM, remove ENB jumper |
+| IN3 | GPIO26 |
+| IN4 | GPIO25 |
+| OUT3 / OUT4 | Motor |
+| GND | ESP32 GND and motor power GND |
+| VS / motor power | Motor supply |
+| 5V / logic | 5V logic supply if required by the module |
+
 ## Radio setup
 
 In EdgeTX/OpenTX model setup:
@@ -64,6 +74,10 @@ Default channel map:
 | CH8 | SD |
 | CH9 | SE |
 | CH10 | S1 |
+
+CH2 / `RJ Y` controls the L298N motor output. Stick values from `0.02` to `1.00`
+drive one direction, values from `-0.02` to `-1.00` drive the opposite direction,
+and `-0.02..0.02` is treated as stop.
 
 The firmware uses inverted CRSF UART by default because this Pocket nano module bay
 signal is inverted relative to ESP32 RX.

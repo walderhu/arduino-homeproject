@@ -12,7 +12,8 @@
     Pocket nano bay CRSF/data signal -> ESP32 GPIO16 through a 3.3V level shifter/divider
     Pocket nano bay GND              -> ESP32 GND
     SE switch (CH9) high output      -> GPIO33, 3.3V when SE is ON
-    RY (CH2) PWM for MOSFET          -> GPIO25, 0..100% duty
+    L298N channel B ENB PWM          -> GPIO27
+    L298N channel B IN3 / IN4        -> GPIO26 / GPIO25
 
   Do not connect bay power/VBAT directly to any ESP32 GPIO.
   Power the ESP32 from USB or a proper regulator.
@@ -36,16 +37,19 @@ static constexpr int8_t OLED_RESET = -1;
 static constexpr uint8_t SERVO_PIN = 15;
 static constexpr uint8_t SE_OUTPUT_PIN = 33; // 3.3V out while SE (CH9) is ON
 static constexpr uint8_t SE_CRSF_CHANNEL = 8;
-static constexpr uint8_t RY_PWM_PIN = 25;
+static constexpr uint8_t RY_PWM_PIN = 27;
+static constexpr uint8_t RY_IN3_PIN = 26;
+static constexpr uint8_t RY_IN4_PIN = 25;
 static constexpr uint8_t RY_CRSF_CHANNEL = 1; // CH2: RJ Y
-static constexpr uint32_t RY_PWM_PERIOD_MS = 2000; // 2s cycle — slow soft-PWM for relay
-static constexpr uint8_t RY_PWM_MIN_ACTIVE_PERCENT = 55; // min ~1.1s ON at low stick
-static constexpr uint8_t RY_STICK_DEADZONE_PERCENT = 2;
 static constexpr uint8_t SERVO_LEDC_CHANNEL = 1;
 static constexpr uint8_t SERVO_LEDC_RES_BITS = 16;
 static constexpr uint16_t SERVO_PWM_HZ = 50;
 static constexpr uint16_t SERVO_MIN_US = 500;
 static constexpr uint16_t SERVO_MAX_US = 2500;
+static constexpr uint8_t RY_LEDC_CHANNEL = 2;
+static constexpr uint8_t RY_LEDC_RES_BITS = 10;
+static constexpr uint16_t RY_PWM_HZ = 20000;
+static constexpr float RY_STICK_DEADZONE = 0.02f;
 static constexpr bool SERVO_SELF_TEST = false;
 static constexpr uint32_t SERVO_SELF_TEST_STEP_MS = 1500;
 
@@ -222,12 +226,12 @@ uint16_t previousActionChannels[MAX_CHANNELS] = {};
 bool previousActionReady = false;
 uint16_t lastServoPulseUs = 0;
 float currentServoAngleDeg = 90.0f;
-uint8_t ryPwmTargetPercent = 0;
+uint16_t ryPwmDuty = 0;
+int8_t ryMotorDirection = 0;
 
 void updateServoFromRx();
 void updateSeOutputFromRx();
 void updateRyPwmFromRx();
-void serviceRyPwmOutput();
 
 bool isCrsfAddress(uint8_t value) {
     switch (value) {
@@ -1209,47 +1213,48 @@ void updateSeOutputFromRx() {
     digitalWrite(SE_OUTPUT_PIN, enabled ? HIGH : LOW);
 }
 
-uint8_t ryPercentFromRx(uint16_t raw) {
-    uint8_t percent = static_cast<uint8_t>(roundf(normalizeCrsf01(raw) * 100.0f));
-    if (percent <= RY_STICK_DEADZONE_PERCENT) {
-        return 0;
+float ryStickFromRx(uint16_t raw) {
+    const float stick = constrain(normalizeCrsfStick(raw), -1.0f, 1.0f);
+    if (fabsf(stick) <= RY_STICK_DEADZONE) {
+        return 0.0f;
     }
-    return percent;
+    return stick;
 }
 
-uint8_t ryPwmEffectivePercent(uint8_t stickPercent) {
-    if (stickPercent == 0) {
-        return 0;
-    }
-    return static_cast<uint8_t>(
-        RY_PWM_MIN_ACTIVE_PERCENT +
-        (static_cast<uint16_t>(stickPercent) * (100 - RY_PWM_MIN_ACTIVE_PERCENT)) / 100);
+uint16_t ryDutyFromStick(float stick) {
+    static constexpr uint16_t maxDuty = (1U << RY_LEDC_RES_BITS) - 1;
+    return static_cast<uint16_t>(fabsf(stick) * maxDuty + 0.5f);
 }
 
 void ryPwmBegin() {
+    pinMode(RY_IN3_PIN, OUTPUT);
+    pinMode(RY_IN4_PIN, OUTPUT);
     pinMode(RY_PWM_PIN, OUTPUT);
-    digitalWrite(RY_PWM_PIN, LOW);
-    ryPwmTargetPercent = 0;
+    ledcSetup(RY_LEDC_CHANNEL, RY_PWM_HZ, RY_LEDC_RES_BITS);
+    ledcAttachPin(RY_PWM_PIN, RY_LEDC_CHANNEL);
+    digitalWrite(RY_IN3_PIN, LOW);
+    digitalWrite(RY_IN4_PIN, LOW);
+    ledcWrite(RY_LEDC_CHANNEL, 0);
+    ryPwmDuty = 0;
+    ryMotorDirection = 0;
 }
 
 void updateRyPwmFromRx() {
-    ryPwmTargetPercent = ryPwmEffectivePercent(ryPercentFromRx(crsfChannels[RY_CRSF_CHANNEL]));
-}
+    const float stick = ryStickFromRx(crsfChannels[RY_CRSF_CHANNEL]);
+    ryPwmDuty = ryDutyFromStick(stick);
 
-void serviceRyPwmOutput() {
-    if (ryPwmTargetPercent == 0) {
-        digitalWrite(RY_PWM_PIN, LOW);
-        return;
-    }
-    if (ryPwmTargetPercent >= 100) {
-        digitalWrite(RY_PWM_PIN, HIGH);
+    if (stick == 0.0f || ryPwmDuty == 0) {
+        ryMotorDirection = 0;
+        digitalWrite(RY_IN3_PIN, LOW);
+        digitalWrite(RY_IN4_PIN, LOW);
+        ledcWrite(RY_LEDC_CHANNEL, 0);
         return;
     }
 
-    const uint32_t elapsed = millis() % RY_PWM_PERIOD_MS;
-    const uint32_t onMs =
-        (static_cast<uint32_t>(ryPwmTargetPercent) * RY_PWM_PERIOD_MS) / 100;
-    digitalWrite(RY_PWM_PIN, elapsed < onMs ? HIGH : LOW);
+    ryMotorDirection = stick > 0.0f ? 1 : -1;
+    digitalWrite(RY_IN3_PIN, ryMotorDirection > 0 ? HIGH : LOW);
+    digitalWrite(RY_IN4_PIN, ryMotorDirection < 0 ? HIGH : LOW);
+    ledcWrite(RY_LEDC_CHANNEL, ryPwmDuty);
 }
 
 void updateServoSelfTest() {
@@ -1305,13 +1310,14 @@ void setup() {
     Serial.println("OLED: SDA=21 SCL=22 addr=0x3C");
     Serial.println("Servo: GPIO15 self-test MIN/CENTER/MAX enabled");
     Serial.println("SE out: GPIO33 = 3.3V when SE (CH9) is ON");
-    Serial.print("RY PWM: GPIO");
+    Serial.print("L298N B: ENB PWM=GPIO");
     Serial.print(RY_PWM_PIN);
-    Serial.print(" 0..100% period=");
-    Serial.print(RY_PWM_PERIOD_MS);
-    Serial.print("ms minActive=");
-    Serial.print(RY_PWM_MIN_ACTIVE_PERCENT);
-    Serial.println('%');
+    Serial.print(" IN3=GPIO");
+    Serial.print(RY_IN3_PIN);
+    Serial.print(" IN4=GPIO");
+    Serial.print(RY_IN4_PIN);
+    Serial.print(" CH2 signed PWM deadzone=+/-");
+    Serial.println(RY_STICK_DEADZONE, 2);
     Serial.println("PPM input: GPIO34, UART RX: GPIO16, GND common, GPIO max 3.3V");
     Serial.println("Commands: crsf, crsfinv, sbus, ibus, raw420, raw100, raw115");
 
@@ -1339,7 +1345,6 @@ void setup() {
 void loop() {
     pollCommands();
     pollSerialProtocol();
-    serviceRyPwmOutput();
 
     if (SERVO_SELF_TEST) {
         updateServoSelfTest();
