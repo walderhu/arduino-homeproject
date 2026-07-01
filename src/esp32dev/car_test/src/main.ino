@@ -479,9 +479,7 @@ float normalizeCrsf01(uint16_t raw) {
     return constrain(value, 0.0f, 1.0f);
 }
 
-float normalizeCrsfStick(uint16_t raw) {
-    return -(normalizeCrsf01(raw) * 2.0f - 1.0f);
-}
+float normalizeCrsfStick(uint16_t raw) { return -(normalizeCrsf01(raw) * 2.0f - 1.0f); }
 
 uint8_t normalizeCrsfButton(uint16_t raw) { return normalizeCrsf01(raw) >= 0.5f ? 1 : 0; }
 
@@ -517,13 +515,9 @@ uint8_t channelPercent(uint16_t raw) {
     return static_cast<uint8_t>(roundf(normalizeCrsf01(raw) * 100.0f));
 }
 
-const char *twoStateName(uint16_t raw) {
-    return normalizeCrsfButton(raw) ? "ON" : "OFF";
-}
+const char *twoStateName(uint16_t raw) { return normalizeCrsfButton(raw) ? "ON" : "OFF"; }
 
-char twoStateShort(uint16_t raw) {
-    return normalizeCrsfButton(raw) ? '1' : '0';
-}
+char twoStateShort(uint16_t raw) { return normalizeCrsfButton(raw) ? '1' : '0'; }
 
 const char *threeStateName(uint16_t raw) {
     switch (normalizeCrsfThreeState(raw)) {
@@ -601,7 +595,8 @@ void updateLastActionFromCrsf() {
     for (uint8_t ch = 10; ch < MAX_CHANNELS; ++ch) {
         const uint8_t current = channelPercent(crsfChannels[ch]);
         const uint8_t previous = channelPercent(previousActionChannels[ch]);
-        if (abs(static_cast<int>(current) - static_cast<int>(previous)) >= POT_ACTION_DELTA_PERCENT) {
+        if (abs(static_cast<int>(current) - static_cast<int>(previous)) >=
+            POT_ACTION_DELTA_PERCENT) {
             setLastActionPercent(ACTION_AUX, ch + 1, current);
         }
     }
@@ -715,9 +710,7 @@ void drawCrsfLivePage() {
     display.print('%');
 }
 
-void drawCrsfOverviewPage() {
-    drawCrsfLivePage();
-}
+void drawCrsfOverviewPage() { drawCrsfLivePage(); }
 
 void drawLargeTextCentered(const char *text, uint8_t textSize, int16_t y) {
     int16_t x1 = 0;
@@ -770,14 +763,14 @@ void drawPotAction(const char *label, const char *value) {
 }
 
 void drawStickAction(bool leftStick) {
-    const float stickX = leftStick ? normalizeCrsfStick(crsfChannels[3])
-                                   : normalizeCrsfStick(crsfChannels[0]);
-    const float stickY = leftStick ? normalizeCrsfStick(crsfChannels[2])
-                                   : normalizeCrsfStick(crsfChannels[1]);
-    const int8_t xPercent = leftStick ? stickPercent(crsfChannels[3])
-                                      : stickPercent(crsfChannels[0]);
-    const int8_t yPercent = leftStick ? stickPercent(crsfChannels[2])
-                                      : stickPercent(crsfChannels[1]);
+    const float stickX =
+        leftStick ? normalizeCrsfStick(crsfChannels[3]) : normalizeCrsfStick(crsfChannels[0]);
+    const float stickY =
+        leftStick ? normalizeCrsfStick(crsfChannels[2]) : normalizeCrsfStick(crsfChannels[1]);
+    const int8_t xPercent =
+        leftStick ? stickPercent(crsfChannels[3]) : stickPercent(crsfChannels[0]);
+    const int8_t yPercent =
+        leftStick ? stickPercent(crsfChannels[2]) : stickPercent(crsfChannels[1]);
 
     drawStickWidget(2, 10, 38, 38, stickX, stickY, leftStick ? "LJ" : "RJ");
 
@@ -1162,16 +1155,15 @@ void autoScanCrsfPolarity() {
     }
     lastScanUartBytes = uartByteCounter;
 
-    const uint8_t nextProfile =
-        activeSerialProfile->profile == SerialProfile::Crsf ? 1 : 0;
+    const uint8_t nextProfile = activeSerialProfile->profile == SerialProfile::Crsf ? 1 : 0;
     startModuleSerial(nextProfile);
     Serial.println("Auto-scan: switched CRSF polarity because UART bytes exist but no RC frame");
 }
 
 uint16_t servoPulseFromRx(uint16_t rxRaw) {
     const float stick = constrain(normalizeCrsfStick(rxRaw), -1.0f, 1.0f);
-    const float pulse = (SERVO_MIN_US + SERVO_MAX_US) * 0.5f +
-                        stick * (SERVO_MAX_US - SERVO_MIN_US) * 0.5f;
+    const float pulse =
+        (SERVO_MIN_US + SERVO_MAX_US) * 0.5f + stick * (SERVO_MAX_US - SERVO_MIN_US) * 0.5f;
     return static_cast<uint16_t>(pulse + 0.5f);
 }
 
